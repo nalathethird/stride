@@ -1,0 +1,155 @@
+// Copyright (c) .NET Foundation and Contributors (https://dotnetfoundation.org/ & https://stride3d.net)
+// Distributed under the MIT license. See the LICENSE.md file in the project root for more information.
+/// <summary>
+/// Applies blend shape (morph target) deformations to position, normal and tangent.
+/// Delta attributes are packed into TEXCOORD slots starting at a high index to avoid conflicts.
+/// </summary>
+/// <remarks>
+/// BlendShapeCount: Macro - number of blend shape targets.
+/// BlendShapeHasTangent: Macro - whether tangent deltas are present (0 or 1).
+/// </remarks>
+#ifndef BlendShapeCount
+# define BlendShapeCount 1
+#endif
+#ifndef BlendShapeHasTangent
+# define BlendShapeHasTangent 0
+#endif
+
+shader TransformationBlendShape : TransformationBase, PositionStream4, NormalStream
+{
+    cbuffer PerDraw
+    {
+        stage float BlendShapeWeightArray[BlendShapeCount];
+    }
+
+#if BlendShapeCount >= 1
+    stage stream float3 BlendShapeDeltaPosition0 : BLENDSHAPE_DELTA_POS0;
+    stage stream float3 BlendShapeDeltaNormal0   : BLENDSHAPE_DELTA_NRM0;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent0  : BLENDSHAPE_DELTA_TAN0;
+#endif
+#endif
+#if BlendShapeCount >= 2
+    stage stream float3 BlendShapeDeltaPosition1 : BLENDSHAPE_DELTA_POS1;
+    stage stream float3 BlendShapeDeltaNormal1   : BLENDSHAPE_DELTA_NRM1;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent1  : BLENDSHAPE_DELTA_TAN1;
+#endif
+#endif
+#if BlendShapeCount >= 3
+    stage stream float3 BlendShapeDeltaPosition2 : BLENDSHAPE_DELTA_POS2;
+    stage stream float3 BlendShapeDeltaNormal2   : BLENDSHAPE_DELTA_NRM2;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent2  : BLENDSHAPE_DELTA_TAN2;
+#endif
+#endif
+#if BlendShapeCount >= 4
+    stage stream float3 BlendShapeDeltaPosition3 : BLENDSHAPE_DELTA_POS3;
+    stage stream float3 BlendShapeDeltaNormal3   : BLENDSHAPE_DELTA_NRM3;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent3  : BLENDSHAPE_DELTA_TAN3;
+#endif
+#endif
+#if BlendShapeCount >= 5
+    stage stream float3 BlendShapeDeltaPosition4 : BLENDSHAPE_DELTA_POS4;
+    stage stream float3 BlendShapeDeltaNormal4   : BLENDSHAPE_DELTA_NRM4;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent4  : BLENDSHAPE_DELTA_TAN4;
+#endif
+#endif
+#if BlendShapeCount >= 6
+    stage stream float3 BlendShapeDeltaPosition5 : BLENDSHAPE_DELTA_POS5;
+    stage stream float3 BlendShapeDeltaNormal5   : BLENDSHAPE_DELTA_NRM5;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent5  : BLENDSHAPE_DELTA_TAN5;
+#endif
+#endif
+#if BlendShapeCount >= 7
+    stage stream float3 BlendShapeDeltaPosition6 : BLENDSHAPE_DELTA_POS6;
+    stage stream float3 BlendShapeDeltaNormal6   : BLENDSHAPE_DELTA_NRM6;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent6  : BLENDSHAPE_DELTA_TAN6;
+#endif
+#endif
+#if BlendShapeCount >= 8
+    stage stream float3 BlendShapeDeltaPosition7 : BLENDSHAPE_DELTA_POS7;
+    stage stream float3 BlendShapeDeltaNormal7   : BLENDSHAPE_DELTA_NRM7;
+#if BlendShapeHasTangent
+    stage stream float3 BlendShapeDeltaTangent7  : BLENDSHAPE_DELTA_TAN7;
+#endif
+#endif
+
+    override stage void PreTransformPosition()
+    {
+        base.PreTransformPosition();
+
+        float3 deltaPos = float3(0, 0, 0);
+        float3 deltaNrm = float3(0, 0, 0);
+#if BlendShapeHasTangent
+        float3 deltaTan = float3(0, 0, 0);
+#endif
+
+#if BlendShapeCount >= 1
+        deltaPos += streams.BlendShapeDeltaPosition0 * BlendShapeWeightArray[0];
+        deltaNrm += streams.BlendShapeDeltaNormal0   * BlendShapeWeightArray[0];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent0  * BlendShapeWeightArray[0];
+#endif
+#endif
+#if BlendShapeCount >= 2
+        deltaPos += streams.BlendShapeDeltaPosition1 * BlendShapeWeightArray[1];
+        deltaNrm += streams.BlendShapeDeltaNormal1   * BlendShapeWeightArray[1];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent1  * BlendShapeWeightArray[1];
+#endif
+#endif
+#if BlendShapeCount >= 3
+        deltaPos += streams.BlendShapeDeltaPosition2 * BlendShapeWeightArray[2];
+        deltaNrm += streams.BlendShapeDeltaNormal2   * BlendShapeWeightArray[2];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent2  * BlendShapeWeightArray[2];
+#endif
+#endif
+#if BlendShapeCount >= 4
+        deltaPos += streams.BlendShapeDeltaPosition3 * BlendShapeWeightArray[3];
+        deltaNrm += streams.BlendShapeDeltaNormal3   * BlendShapeWeightArray[3];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent3  * BlendShapeWeightArray[3];
+#endif
+#endif
+#if BlendShapeCount >= 5
+        deltaPos += streams.BlendShapeDeltaPosition4 * BlendShapeWeightArray[4];
+        deltaNrm += streams.BlendShapeDeltaNormal4   * BlendShapeWeightArray[4];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent4  * BlendShapeWeightArray[4];
+#endif
+#endif
+#if BlendShapeCount >= 6
+        deltaPos += streams.BlendShapeDeltaPosition5 * BlendShapeWeightArray[5];
+        deltaNrm += streams.BlendShapeDeltaNormal5   * BlendShapeWeightArray[5];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent5  * BlendShapeWeightArray[5];
+#endif
+#endif
+#if BlendShapeCount >= 7
+        deltaPos += streams.BlendShapeDeltaPosition6 * BlendShapeWeightArray[6];
+        deltaNrm += streams.BlendShapeDeltaNormal6   * BlendShapeWeightArray[6];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent6  * BlendShapeWeightArray[6];
+#endif
+#endif
+#if BlendShapeCount >= 8
+        deltaPos += streams.BlendShapeDeltaPosition7 * BlendShapeWeightArray[7];
+        deltaNrm += streams.BlendShapeDeltaNormal7   * BlendShapeWeightArray[7];
+#if BlendShapeHasTangent
+        deltaTan += streams.BlendShapeDeltaTangent7  * BlendShapeWeightArray[7];
+#endif
+#endif
+
+        streams.Position.xyz += deltaPos;
+        streams.meshNormal = normalize(streams.meshNormal + deltaNrm);
+#if BlendShapeHasTangent
+        streams.meshTangent.xyz = normalize(streams.meshTangent.xyz + deltaTan);
+#endif
+    }
+};

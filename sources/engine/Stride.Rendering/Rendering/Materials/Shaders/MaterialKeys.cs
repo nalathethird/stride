@@ -125,7 +125,13 @@ namespace Stride.Rendering.Materials
         public static readonly PermutationParameterKey<bool> HasSkinningTangent = ParameterKeys.NewPermutation<bool>();
 
         public static readonly PermutationParameterKey<int> SkinningMaxBones = ParameterKeys.NewPermutation<int>(56);
-        
+
+        public static readonly PermutationParameterKey<bool> HasBlendShapes = ParameterKeys.NewPermutation<bool>();
+
+        public static readonly PermutationParameterKey<int> BlendShapeCount = ParameterKeys.NewPermutation<int>(0);
+
+        public static readonly PermutationParameterKey<bool> BlendShapeHasTangent = ParameterKeys.NewPermutation<bool>();
+
         public static readonly PermutationParameterKey<bool> UsePixelShaderWithDepthPass = ParameterKeys.NewPermutation<bool>();
         
         public static readonly PermutationParameterKey<bool> UseDitheredShadows = ParameterKeys.NewPermutation<bool>();

@@ -43,6 +43,11 @@ namespace Stride.Engine
             public Matrix[] BlendMatrices;
 
             /// <summary>
+            /// The current blend shape (morph target) weights for each target.
+            /// </summary>
+            public float[] BlendShapeWeights;
+
+            /// <summary>
             /// The meshes current bounding box in world space.
             /// </summary>
             public BoundingBox BoundingBox;
@@ -211,6 +216,9 @@ namespace Stride.Engine
 
                     if (mesh.Skinning != null)
                         meshData.BlendMatrices = new Matrix[mesh.Skinning.Bones.Length];
+
+                    if (mesh.BlendShapes?.Targets != null)
+                        meshData.BlendShapeWeights = new float[mesh.BlendShapes.Targets.Length];
                 }
 
                 if (skeleton != null)

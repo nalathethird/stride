@@ -35,6 +35,7 @@ namespace Stride.Rendering
             BoundingBox = mesh.BoundingBox;
             BoundingSphere = mesh.BoundingSphere;
             Skinning = mesh.Skinning;
+            BlendShapes = mesh.BlendShapes;
         }
 
         /// <summary>
@@ -76,5 +77,10 @@ namespace Stride.Rendering
 
         // TODO: Skinning could be shared between multiple Mesh inside a ModelView (multimaterial, etc...)
         public MeshSkinningDefinition Skinning;
+
+        /// <summary>
+        /// Gets or sets the blend shape (morph target) definition for this mesh.
+        /// </summary>
+        public MeshBlendShapeDefinition BlendShapes;
     }
 }

@@ -37,6 +37,8 @@ namespace Stride.Rendering
 
         public Matrix[] BlendMatrices;
 
+        public float[] BlendShapeWeights;
+
         public int InstanceCount;
     }
 }

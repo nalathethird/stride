@@ -40,6 +40,7 @@ namespace Stride.Assets.Presentation.AssetEditors.EntityHierarchyEditor.ViewMode
         private readonly ModelComponentViewModel modelComponent;
         private readonly ParticleSystemComponentViewModel particleComponent;
         private readonly CameraComponentViewModel cameraComponent;
+        private readonly BlendShapeComponentViewModel blendShapeComponent;
 
         private readonly MemberGraphNodeBinding<string> nameNodeBinding;
         private readonly ObjectGraphNodeBinding<EntityComponentCollection> componentsNodeBinding;
@@ -60,6 +61,7 @@ namespace Stride.Assets.Presentation.AssetEditors.EntityHierarchyEditor.ViewMode
             modelComponent = new ModelComponentViewModel(ServiceProvider, this);
             particleComponent = new ParticleSystemComponentViewModel(ServiceProvider, this);
             cameraComponent = new CameraComponentViewModel(ServiceProvider, this);
+            blendShapeComponent = new BlendShapeComponentViewModel(ServiceProvider, this);
             transformationNode = Editor.NodeContainer.GetNode(AssetSideEntity.Transform)[nameof(TransformComponent.Children)].Target;
             transformationNode.ItemChanging += TransformChildrenChanging;
             transformationNode.ItemChanged += TransformChildrenChanged;
@@ -108,6 +110,7 @@ namespace Stride.Assets.Presentation.AssetEditors.EntityHierarchyEditor.ViewMode
             // We need the propagator ready to initialize the model component view model, since it might modify the material list.
             await propagator.Initialized;
             modelComponent.Initialize();
+            blendShapeComponent.Initialize();
         }
 
         /// <inheritdoc/>
@@ -125,6 +128,7 @@ namespace Stride.Assets.Presentation.AssetEditors.EntityHierarchyEditor.ViewMode
             if (node == null) throw new ArgumentNullException(nameof(node));
             base.UpdateNodePresenter(node);
             modelComponent.UpdateNodePresenter(node);
+            blendShapeComponent.UpdateNodePresenter(node);
         }
 
         /// <inheritdoc/>
@@ -258,6 +262,7 @@ namespace Stride.Assets.Presentation.AssetEditors.EntityHierarchyEditor.ViewMode
             modelComponent.Destroy();
             particleComponent.Destroy();
             cameraComponent.Destroy();
+            blendShapeComponent.Destroy();
             propagator?.Destroy();
         }
 

@@ -229,6 +229,19 @@ namespace Stride.Importer.ThreeD
                         };
                     }
 
+                    if (meshInfo.BlendShapeTargets != null)
+                    {
+                        nodeMeshData.BlendShapes = new MeshBlendShapeDefinition
+                        {
+                            Targets = meshInfo.BlendShapeTargets
+                        };
+                        nodeMeshData.Parameters.Set(MaterialKeys.HasBlendShapes, true);
+                        nodeMeshData.Parameters.Set(MaterialKeys.BlendShapeCount, meshInfo.BlendShapeTargets.Length);
+
+                        if (meshInfo.HasBlendShapeTangent)
+                            nodeMeshData.Parameters.Set(MaterialKeys.BlendShapeHasTangent, true);
+                    }
+
                     if (meshInfo.HasSkinningPosition && meshInfo.TotalClusterCount > 0)
                         nodeMeshData.Parameters.Set(MaterialKeys.HasSkinningPosition, true);
 
@@ -511,12 +524,15 @@ namespace Stride.Importer.ThreeD
                 // name of the animation (dropped)
                 var animName = aiAnim->MName.AsString.CleanNodeName(); // used only be the logger
 
-                // animation using meshes (not supported)
+                // animation using meshes (mesh switching — not supported)
                 for (uint meshAnimId = 0; meshAnimId < aiAnim->MNumMeshChannels; ++meshAnimId)
                 {
                     var meshName = aiAnim->MMeshChannels[meshAnimId]->MName.AsString;
-                    Logger.Warning($"Mesh animations are not currently supported. Animation '{animName}' on mesh {meshName} will be ignored");
+                    Logger.Warning($"Mesh switching animations are not currently supported. Animation '{animName}' on mesh {meshName} will be ignored");
                 }
+
+                // morph target weight animation (blend shapes)
+                ProcessMorphMeshAnimations(scene, aiAnim, ticksPerSec, animationData.AnimationClips);
 
                 // animation on nodes
                 for (uint nodeAnimId = 0; nodeAnimId < aiAnim->MNumChannels; ++nodeAnimId)
@@ -650,6 +666,112 @@ namespace Stride.Importer.ThreeD
             if (nbKeys > 0 && animationClip.Duration < lastKeyTime)
             {
                 animationClip.Duration = lastKeyTime;
+            }
+        }
+
+        /// <summary>
+        /// Processes morph target weight animations from Assimp MMorphMeshChannels.
+        /// Each MeshMorphAnim channel targets a mesh by name and contains keyframes with per-target weights.
+        /// Blend shape weight curves are stored in the animation clips dictionary under a reserved prefix
+        /// so that the asset pipeline can map them to BlendShapeComponent property paths.
+        /// </summary>
+        private unsafe void ProcessMorphMeshAnimations(Scene* scene, Animation* aiAnim, double ticksPerSec, Dictionary<string, AnimationClip> animationClips)
+        {
+            if (aiAnim->MNumMorphMeshChannels == 0)
+                return;
+
+            // Build a map from mesh name to its blend shape target names
+            var meshNameToTargetNames = new Dictionary<string, string[]>();
+            for (uint meshIdx = 0; meshIdx < scene->MNumMeshes; meshIdx++)
+            {
+                var mesh = scene->MMeshes[meshIdx];
+                if (mesh->MNumAnimMeshes == 0)
+                    continue;
+
+                var meshName = mesh->MName.AsString;
+                var maxTargets = Math.Min((int)mesh->MNumAnimMeshes, 8);
+                var targetNames = new string[maxTargets];
+                for (int t = 0; t < maxTargets; t++)
+                {
+                    var animMesh = mesh->MAnimMeshes[t];
+                    targetNames[t] = animMesh->MName.Length > 0 ? animMesh->MName.AsString : $"BlendShape{t}";
+                }
+                meshNameToTargetNames[meshName] = targetNames;
+            }
+
+            for (uint channelIdx = 0; channelIdx < aiAnim->MNumMorphMeshChannels; channelIdx++)
+            {
+                var morphChannel = aiAnim->MMorphMeshChannels[channelIdx];
+                var channelMeshName = morphChannel->MName.AsString;
+
+                if (!meshNameToTargetNames.TryGetValue(channelMeshName, out var targetNames))
+                {
+                    Logger.Warning($"Morph animation channel '{channelMeshName}' references a mesh with no blend shape targets. Skipping.");
+                    continue;
+                }
+
+                if (morphChannel->MNumKeys == 0)
+                    continue;
+
+                // Create one AnimationCurve<float> per blend shape target
+                var curves = new AnimationCurve<float>[targetNames.Length];
+                for (int t = 0; t < targetNames.Length; t++)
+                {
+                    curves[t] = new AnimationCurve<float>
+                    {
+                        InterpolationType = AnimationCurveInterpolationType.Linear
+                    };
+                }
+
+                var lastKeyTime = new CompressedTimeSpan();
+
+                for (uint keyIdx = 0; keyIdx < morphChannel->MNumKeys; keyIdx++)
+                {
+                    var morphKey = morphChannel->MKeys[keyIdx];
+                    var keyTime = Utils.AiTimeToStrideTimeSpan(morphKey.MTime, ticksPerSec);
+                    lastKeyTime = keyTime;
+
+                    // Each morph key has MNumValuesAndWeights entries
+                    // MValues[i] = target index, MWeights[i] = weight for that target
+                    for (uint vi = 0; vi < morphKey.MNumValuesAndWeights; vi++)
+                    {
+                        var targetIndex = (int)morphKey.MValues[vi];
+                        var weight = (float)morphKey.MWeights[vi];
+
+                        if (targetIndex >= 0 && targetIndex < curves.Length)
+                        {
+                            curves[targetIndex].KeyFrames.Add(new KeyFrameData<float>(keyTime, weight));
+                        }
+                    }
+
+                    // Targets not mentioned in this key get a 0 weight keyframe
+                    for (int t = 0; t < curves.Length; t++)
+                    {
+                        if (curves[t].KeyFrames.Count == 0 || curves[t].KeyFrames[curves[t].KeyFrames.Count - 1].Time != keyTime)
+                        {
+                            curves[t].KeyFrames.Add(new KeyFrameData<float>(keyTime, 0.0f));
+                        }
+                    }
+                }
+
+                // Store curves in animation clips with a reserved key pattern
+                // The key format is "__MorphWeights__/{meshName}" so the asset pipeline can detect it
+                var clipKey = $"__MorphWeights__/{channelMeshName}";
+                var clip = new AnimationClip();
+
+                for (int t = 0; t < targetNames.Length; t++)
+                {
+                    if (curves[t].KeyFrames.Count > 0)
+                    {
+                        clip.AddCurve(targetNames[t], curves[t], false);
+                    }
+                }
+
+                if (clip.Curves.Count > 0)
+                {
+                    clip.Duration = lastKeyTime;
+                    animationClips[clipKey] = clip;
+                }
             }
         }
 
@@ -1076,6 +1198,108 @@ namespace Stride.Importer.ThreeD
             drawData.PrimitiveType = PrimitiveType.TriangleList;
             drawData.DrawCount = (int)nbIndices;
 
+            // Extract blend shape (morph target) data from Assimp AnimMeshes
+            BlendShapeTarget[] blendShapeTargets = null;
+            bool hasAnyBlendShapeTangent = false;
+            if (mesh->MNumAnimMeshes > 0)
+            {
+                var maxTargets = Math.Min((int)mesh->MNumAnimMeshes, 8);
+                blendShapeTargets = new BlendShapeTarget[maxTargets];
+
+                var blendShapeVertexBuffers = new List<VertexBufferBinding> { vertexBufferBinding };
+
+                for (int targetIdx = 0; targetIdx < maxTargets; targetIdx++)
+                {
+                    var animMesh = mesh->MAnimMeshes[targetIdx];
+                    var hasDeltaPositions = animMesh->MVertices != null;
+                    var hasDeltaNormals = animMesh->MNormals != null;
+                    var hasDeltaTangents = animMesh->MTangents != null && mesh->MTangents != null;
+
+                    if (hasDeltaTangents)
+                        hasAnyBlendShapeTangent = true;
+
+                    blendShapeTargets[targetIdx] = new BlendShapeTarget
+                    {
+                        Name = animMesh->MName.Length > 0 ? animMesh->MName.AsString : $"BlendShape{targetIdx}",
+                        HasDeltaPositions = hasDeltaPositions,
+                        HasDeltaNormals = hasDeltaNormals,
+                        HasDeltaTangents = hasDeltaTangents,
+                    };
+
+                    // Build a vertex buffer with delta position, delta normal and delta tangent for this target
+                    var bsElements = new List<VertexElement>();
+                    var bsStride = 0;
+
+                    if (hasDeltaPositions)
+                    {
+                        bsElements.Add(new VertexElement($"BLENDSHAPE_DELTA_POS{targetIdx}", 0, PixelFormat.R32G32B32_Float, bsStride));
+                        bsStride += sizeof(float) * 3;
+                    }
+
+                    if (hasDeltaNormals)
+                    {
+                        bsElements.Add(new VertexElement($"BLENDSHAPE_DELTA_NRM{targetIdx}", 0, PixelFormat.R32G32B32_Float, bsStride));
+                        bsStride += sizeof(float) * 3;
+                    }
+
+                    if (hasDeltaTangents)
+                    {
+                        bsElements.Add(new VertexElement($"BLENDSHAPE_DELTA_TAN{targetIdx}", 0, PixelFormat.R32G32B32_Float, bsStride));
+                        bsStride += sizeof(float) * 3;
+                    }
+
+                    if (bsStride == 0)
+                        continue;
+
+                    var bsVertexBuffer = new byte[bsStride * mesh->MNumVertices];
+                    fixed (byte* bsPtr = &bsVertexBuffer[0])
+                    {
+                        var ptr = bsPtr;
+                        for (uint vi = 0; vi < mesh->MNumVertices; vi++)
+                        {
+                            if (hasDeltaPositions)
+                            {
+                                // AnimMesh stores absolute positions; compute delta = animMesh.pos - baseMesh.pos
+                                var basePos = mesh->MVertices[vi].ToStrideVector3();
+                                var morphPos = animMesh->MVertices[vi].ToStrideVector3();
+                                var delta = morphPos - basePos;
+                                Core.Mathematics.Vector3.TransformNormal(ref delta, ref rootTransform, out delta);
+                                *((Core.Mathematics.Vector3*)ptr) = delta;
+                                ptr += sizeof(float) * 3;
+                            }
+
+                            if (hasDeltaNormals)
+                            {
+                                var baseNrm = mesh->MNormals[vi].ToStrideVector3();
+                                var morphNrm = animMesh->MNormals[vi].ToStrideVector3();
+                                var deltaNrm = morphNrm - baseNrm;
+                                Core.Mathematics.Vector3.TransformNormal(ref deltaNrm, ref rootTransform, out deltaNrm);
+                                *((Core.Mathematics.Vector3*)ptr) = deltaNrm;
+                                ptr += sizeof(float) * 3;
+                            }
+
+                            if (hasDeltaTangents)
+                            {
+                                var baseTan = mesh->MTangents[vi].ToStrideVector3();
+                                var morphTan = animMesh->MTangents[vi].ToStrideVector3();
+                                var deltaTan = morphTan - baseTan;
+                                Core.Mathematics.Vector3.TransformNormal(ref deltaTan, ref rootTransform, out deltaTan);
+                                *((Core.Mathematics.Vector3*)ptr) = deltaTan;
+                                ptr += sizeof(float) * 3;
+                            }
+                        }
+                    }
+
+                    var bsDecl = new VertexDeclaration(bsElements.ToArray());
+                    var bsBinding = new VertexBufferBinding(
+                        GraphicsSerializerExtensions.ToSerializableVersion(new BufferData(BufferFlags.VertexBuffer, bsVertexBuffer)),
+                        bsDecl, (int)mesh->MNumVertices, bsDecl.VertexStride, 0);
+                    blendShapeVertexBuffers.Add(bsBinding);
+                }
+
+                drawData.VertexBuffers = blendShapeVertexBuffers.ToArray();
+            }
+
             return new MeshInfo
             {
                 Draw = drawData,
@@ -1084,7 +1308,9 @@ namespace Stride.Importer.ThreeD
                 MaterialIndex = (int)mesh->MMaterialIndex,
                 HasSkinningPosition = hasSkinningPosition,
                 HasSkinningNormal = hasSkinningNormal,
-                TotalClusterCount = totalClusterCount
+                TotalClusterCount = totalClusterCount,
+                BlendShapeTargets = blendShapeTargets,
+                HasBlendShapeTangent = hasAnyBlendShapeTangent,
             };
         }
 
@@ -1643,6 +1869,8 @@ namespace Stride.Importer.ThreeD
         public bool HasSkinningPosition = false;
         public bool HasSkinningNormal = false;
         public int TotalClusterCount = 0;
+        public BlendShapeTarget[] BlendShapeTargets;
+        public bool HasBlendShapeTangent = false;
     }
 
     public class MaterialInstantiation

@@ -90,6 +90,16 @@ namespace Stride.Rendering
 
 
         // -----------------------------------------------
+        // Performs blend shape (morph target) deformation
+        // -----------------------------------------------
+        if (MaterialKeys.HasBlendShapes)
+        {
+            mixin macro MaterialKeys.BlendShapeCount;
+            mixin macro MaterialKeys.BlendShapeHasTangent;
+            mixin TransformationBlendShape;
+        }
+
+        // -----------------------------------------------
         // Performs animation skinning (position, normal and tangent)
         // -----------------------------------------------
         if (MaterialKeys.HasSkinningPosition)

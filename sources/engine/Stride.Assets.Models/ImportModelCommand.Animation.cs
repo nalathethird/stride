@@ -12,6 +12,7 @@ using Stride.Core.Mathematics;
 using Stride.Core.Serialization.Contents;
 using Stride.Updater;
 using Stride.Animations;
+using Stride.Engine;
 using Stride.Rendering;
 
 namespace Stride.Assets.Models
@@ -253,6 +254,43 @@ namespace Stride.Assets.Models
                                 animationClip.AddCurve($"[ModelComponent.Key].Skeleton.NodeTransformations[{skeletonMapping.SourceToTarget[nodeIndex]}]." + channelName, curve);
                             }
                         }
+                    }
+                }
+
+                // Process morph target weight animation clips (blend shapes)
+                // Build a global name → index mapping matching the order BlendShapeComponent.InitializeFromModel produces
+                var morphTargetNameToIndex = new Dictionary<string, int>();
+                if (modelSkeleton != null)
+                {
+                    // Collect unique target names across all morph clips in order
+                    foreach (var morphClipPair in animationClips)
+                    {
+                        if (!morphClipPair.Key.StartsWith("__MorphWeights__/", StringComparison.Ordinal))
+                            continue;
+
+                        foreach (var channel in morphClipPair.Value.Channels)
+                        {
+                            if (!morphTargetNameToIndex.ContainsKey(channel.Key))
+                            {
+                                morphTargetNameToIndex[channel.Key] = morphTargetNameToIndex.Count;
+                            }
+                        }
+                    }
+                }
+
+                foreach (var morphClipPair in animationClips)
+                {
+                    if (!morphClipPair.Key.StartsWith("__MorphWeights__/", StringComparison.Ordinal))
+                        continue;
+
+                    var morphClip = morphClipPair.Value;
+                    foreach (var channel in morphClip.Channels)
+                    {
+                        if (!morphTargetNameToIndex.TryGetValue(channel.Key, out var targetIndex))
+                            continue;
+
+                        var curve = morphClip.Curves[channel.Value.CurveIndex];
+                        animationClip.AddCurve($"[{nameof(BlendShapeComponent)}.Key].WeightValues[{targetIndex}]", curve);
                     }
                 }
 
