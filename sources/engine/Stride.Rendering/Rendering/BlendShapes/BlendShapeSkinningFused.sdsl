@@ -1,0 +1,166 @@
+// Copyright (c) .NET Foundation and Contributors (https://dotnetfoundation.org/ & https://stride3d.net)
+// Distributed under the MIT license. See the LICENSE.md file in the project root for more information.
+
+/// <summary>
+/// GPU compute shader that fuses blend shape deformation and skeletal skinning into
+/// a single dispatch, eliminating redundant vertex buffer reads between the two passes.
+///
+/// ARCHITECTURE:
+///
+/// Without fusion (Phase 1):
+///   Compute: read base → accumulate deltas → write VB (bind space)
+///   VS:      read VB → read bone weights/indices → skinning → world space
+///
+/// With fusion (Phase 2):
+///   Compute: read base → accumulate deltas → read bone weights/indices → skinning → write VB (object space)
+///   VS:      read VB → multiply by World → world space (standard non-skinned path)
+///
+/// The fused shader receives OBJECT-SPACE bone matrices:
+///   ObjectSpaceBone[i] = BlendMatrices[i] * MeshWorldInverse
+///   = InverseBindPose[i] * BoneWorld[i] * MeshWorldInverse
+///   = InverseBindPose[i] * BoneModelSpace[i]
+///
+/// This transforms vertices from bind space → object space. The VS then applies the
+/// entity's World matrix normally (object → world), so the standard lighting, normal
+/// mapping, and tangent-to-world pipelines work without modification.
+///
+/// BENEFITS:
+///   - Eliminates one full vertex buffer read (the VS skinning pass)
+///   - Removes VS skinning computation (4 bone lookups + matrix blend per vertex)
+///   - Natural fit: blend shapes and skinning are always co-located on character meshes
+///   - Compute is more efficient for this work (wider warps, no per-pixel overhead)
+///
+/// SKINNING MATH:
+///   skinMatrix = sum(BoneMatrices[boneIdx[i]] * boneWeight[i]) for i=0..3
+///   position   = mul(float4(blendShapePos, 1.0), skinMatrix).xyz
+///   normal     = normalize(mul(blendShapeNormal, (float3x3)skinMatrix))
+///   tangent    = mul(blendShapeTangent, (float3x3)skinMatrix)
+///
+/// Note: tangent is NOT normalized here — the TBN construction in the pixel shader
+/// normalizes it, and preserving length allows interpolation artifacts to be minimal.
+/// </summary>
+#ifndef ThreadNumberX
+# define ThreadNumberX 64
+#endif
+#ifndef ThreadNumberY
+# define ThreadNumberY 1
+#endif
+#ifndef ThreadNumberZ
+# define ThreadNumberZ 1
+#endif
+shader BlendShapeSkinningFused : ComputeShaderBase
+{
+    // Struct wrappers for StructuredBuffer types
+    // (SDSL parser requires named structs for matrix/vector4 template args)
+    struct BoneMatrix  { float4x4 Matrix; };
+    struct BoneWeight  { float4 Weights; };
+    struct BoneIndex   { int4 Indices; };
+
+    // --- Input: base vertex attributes (bind pose, uploaded once at init) ---
+    stage StructuredBuffer<float3> BasePositions;
+    stage StructuredBuffer<float3> BaseNormals;
+    stage StructuredBuffer<float3> BaseTangents;
+
+    // --- Input: per-target deltas, dense contiguous layout ---
+    // Layout: [target0_vert0..target0_vertN-1, target1_vert0..target1_vertN-1, ...]
+    // Address: DeltaPositions[targetIndex * VertexCount + vertexId]
+    stage StructuredBuffer<float3> DeltaPositions;
+    stage StructuredBuffer<float3> DeltaNormals;
+    stage StructuredBuffer<float3> DeltaTangents;
+
+    // --- Input: active target compaction (rebuilt by CPU each dirty frame) ---
+    stage StructuredBuffer<uint>  ActiveTargetIndices;
+    stage StructuredBuffer<float> ActiveWeights;
+
+    // --- Input: skeletal skinning data ---
+    // Object-space bone matrices: InverseBindPose * BoneModelSpace
+    // (CPU pre-multiplies BlendMatrices[i] * MeshWorldInverse)
+    stage StructuredBuffer<BoneMatrix> BoneMatrices;
+
+    // Per-vertex bone weights and indices (extracted from VB at init time)
+    stage StructuredBuffer<BoneWeight> VertexBoneWeights;
+    stage StructuredBuffer<BoneIndex>  VertexBoneIndices;
+
+    // --- Output: interleaved vertex buffer (same buffer used by draw calls) ---
+    stage RWByteAddressBuffer OutputVertexBuffer;
+
+    // --- Uniforms ---
+    cbuffer BlendShapeSkinningParams
+    {
+        stage int VertexCount;        // vertices in the base mesh
+        stage int ActiveTargetCount;  // number of targets with |weight| > epsilon
+        stage int VertexStride;       // output VB stride in bytes
+        stage int PositionOffset;     // byte offset of POSITION in vertex stride
+        stage int NormalOffset;       // byte offset of NORMAL in vertex stride
+        stage int TangentOffset;      // byte offset of TANGENT in vertex stride (-1 if absent)
+    };
+
+    override void Compute()
+    {
+        uint vertexId = streams.DispatchThreadId.x;
+        if (vertexId >= (uint)VertexCount)
+            return;
+
+        // ================================================================
+        // PHASE 1: Blend shape accumulation (bind space)
+        // ================================================================
+
+        // Load base mesh data into registers (read once from VRAM)
+        float3 pos = BasePositions[vertexId];
+        float3 nrm = BaseNormals[vertexId];
+        float3 tan = float3(0, 0, 0);
+        bool hasTan = TangentOffset >= 0;
+        if (hasTan)
+            tan = BaseTangents[vertexId];
+
+        // Accumulate weighted deltas — ONLY active targets, branch-free
+        for (int a = 0; a < ActiveTargetCount; a++)
+        {
+            uint targetIdx = ActiveTargetIndices[a];
+            float w = ActiveWeights[a];
+
+            uint deltaBase = targetIdx * (uint)VertexCount + vertexId;
+
+            pos += DeltaPositions[deltaBase] * w;
+            nrm += DeltaNormals[deltaBase] * w;
+            if (hasTan)
+                tan += DeltaTangents[deltaBase] * w;
+        }
+
+        // ================================================================
+        // PHASE 2: Skeletal skinning (bind space → object space)
+        // ================================================================
+
+        // Read per-vertex bone weights and indices
+        float4 boneWeights = VertexBoneWeights[vertexId].Weights;
+        int4   boneIndices = VertexBoneIndices[vertexId].Indices;
+
+        // Compute blended skinning matrix from up to 4 bones
+        // BoneMatrices are in object space (CPU pre-multiplied with MeshWorldInverse)
+        float4x4 skinMatrix = BoneMatrices[boneIndices.x].Matrix * boneWeights.x
+                             + BoneMatrices[boneIndices.y].Matrix * boneWeights.y
+                             + BoneMatrices[boneIndices.z].Matrix * boneWeights.z
+                             + BoneMatrices[boneIndices.w].Matrix * boneWeights.w;
+
+        // Transform position: bind space → object space
+        pos = mul(float4(pos, 1.0), skinMatrix).xyz;
+
+        // Transform normal: rotate by skinning matrix (3x3 portion)
+        nrm = normalize(mul(nrm, (float3x3)skinMatrix));
+
+        // Transform tangent: rotate by skinning matrix (no normalize — PS handles it)
+        if (hasTan)
+            tan = mul(tan, (float3x3)skinMatrix);
+
+        // ================================================================
+        // OUTPUT: Write to interleaved vertex buffer
+        // ================================================================
+
+        uint baseAddr = vertexId * (uint)VertexStride;
+
+        OutputVertexBuffer.Store3(baseAddr + (uint)PositionOffset, asuint(pos));
+        OutputVertexBuffer.Store3(baseAddr + (uint)NormalOffset, asuint(nrm));
+        if (hasTan)
+            OutputVertexBuffer.Store3(baseAddr + (uint)TangentOffset, asuint(tan));
+    }
+};

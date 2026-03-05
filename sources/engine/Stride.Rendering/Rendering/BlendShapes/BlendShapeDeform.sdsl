@@ -1,0 +1,122 @@
+// Copyright (c) .NET Foundation and Contributors (https://dotnetfoundation.org/ & https://stride3d.net)
+// Distributed under the MIT license. See the LICENSE.md file in the project root for more information.
+
+/// <summary>
+/// GPU compute shader for blend shape (morph target) vertex deformation.
+///
+/// OPTIMIZATION STRATEGY:
+///
+/// 1. Active Target Compaction (CPU→GPU)
+///    Only targets with |weight| > epsilon are uploaded. The shader receives a compact
+///    list of active target indices + weights. Zero-weight targets incur ZERO cost:
+///    no memory reads, no ALU, no branch misprediction.
+///
+/// 2. Branch-free Inner Loop
+///    Every loop iteration performs useful work — the weight is guaranteed non-zero
+///    by CPU-side filtering. No warp divergence from weight checks.
+///
+/// 3. Dense Delta Layout (intentional)
+///    Deltas are stored densely per-target: DeltaPositions[targetIdx * VertexCount + vertexId].
+///    Adjacent threads in a warp read adjacent offsets → perfectly coalesced reads → full
+///    cache line utilization. This beats sparse (binary search) on modern GPUs where
+///    bandwidth is plentiful and divergent control flow is the real enemy.
+///
+/// 4. Single Dispatch per Mesh
+///    All vertices processed in one dispatch call. Multi-dispatch scatter approaches
+///    save per-target reads but require UAV barriers between dispatches — the barrier
+///    latency typically exceeds the bandwidth saved for meshes under ~100k vertices.
+///
+/// 5. Dirty Flagging (CPU Processor)
+///    The BlendShapeProcessor compares weights frame-to-frame and skips the dispatch
+///    entirely when nothing changed. Costs zero GPU time for static poses.
+///
+/// FUTURE: Skinning fusion (blend shapes + bone skinning in one dispatch) eliminates
+/// the redundant vertex buffer read in the vertex shader skinning pass.
+/// </summary>
+#ifndef ThreadNumberX
+# define ThreadNumberX 64
+#endif
+#ifndef ThreadNumberY
+# define ThreadNumberY 1
+#endif
+#ifndef ThreadNumberZ
+# define ThreadNumberZ 1
+#endif
+shader BlendShapeDeform : ComputeShaderBase
+{
+    // --- Input: base vertex attributes (bind pose, uploaded once at init) ---
+    stage StructuredBuffer<float3> BasePositions;
+    stage StructuredBuffer<float3> BaseNormals;
+    stage StructuredBuffer<float3> BaseTangents;
+
+    // --- Input: per-target deltas, dense contiguous layout ---
+    // Layout: [target0_vert0..target0_vertN-1, target1_vert0..target1_vertN-1, ...]
+    // Address: DeltaPositions[targetIndex * VertexCount + vertexId]
+    stage StructuredBuffer<float3> DeltaPositions;
+    stage StructuredBuffer<float3> DeltaNormals;
+    stage StructuredBuffer<float3> DeltaTangents;
+
+    // --- Input: active target compaction (rebuilt by CPU each dirty frame) ---
+    // ActiveTargetIndices[i] maps to the original target index in the delta arrays.
+    // ActiveWeights[i] is guaranteed |w| > epsilon by CPU filtering.
+    stage StructuredBuffer<uint>  ActiveTargetIndices;
+    stage StructuredBuffer<float> ActiveWeights;
+
+    // --- Output: interleaved vertex buffer (same buffer used by draw calls) ---
+    stage RWByteAddressBuffer OutputVertexBuffer;
+
+    // --- Uniforms ---
+    cbuffer BlendShapeParams
+    {
+        stage int VertexCount;        // vertices in the base mesh
+        stage int ActiveTargetCount;  // number of targets with |weight| > epsilon (0 = base only)
+        stage int VertexStride;       // output VB stride in bytes
+        stage int PositionOffset;     // byte offset of POSITION in vertex stride
+        stage int NormalOffset;       // byte offset of NORMAL in vertex stride
+        stage int TangentOffset;      // byte offset of TANGENT in vertex stride (-1 if absent)
+    };
+
+    override void Compute()
+    {
+        uint vertexId = streams.DispatchThreadId.x;
+        if (vertexId >= (uint)VertexCount)
+            return;
+
+        // Load base mesh data into registers (read once from VRAM)
+        float3 pos = BasePositions[vertexId];
+        float3 nrm = BaseNormals[vertexId];
+        float3 tan = float3(0, 0, 0);
+        bool hasTan = TangentOffset >= 0;
+        if (hasTan)
+            tan = BaseTangents[vertexId];
+
+        // Accumulate weighted deltas — ONLY active targets, branch-free
+        // CPU guarantees: ActiveTargetCount <= total targets, all weights are significant
+        for (int a = 0; a < ActiveTargetCount; a++)
+        {
+            uint targetIdx = ActiveTargetIndices[a];
+            float w = ActiveWeights[a];
+
+            // Dense addressing: contiguous per-target blocks for coalesced warp reads
+            uint deltaBase = targetIdx * (uint)VertexCount + vertexId;
+
+            pos += DeltaPositions[deltaBase] * w;
+            nrm += DeltaNormals[deltaBase] * w;
+            if (hasTan)
+                tan += DeltaTangents[deltaBase] * w;
+        }
+
+        // Normalize direction vectors
+        nrm = normalize(nrm);
+        if (hasTan)
+            tan = normalize(tan);
+
+        // Store to interleaved output vertex buffer at correct byte offsets
+        uint baseAddr = vertexId * (uint)VertexStride;
+
+        OutputVertexBuffer.Store3(baseAddr + (uint)PositionOffset, asuint(pos));
+        OutputVertexBuffer.Store3(baseAddr + (uint)NormalOffset, asuint(nrm));
+        if (hasTan)
+            OutputVertexBuffer.Store3(baseAddr + (uint)TangentOffset, asuint(tan));
+    }
+};
