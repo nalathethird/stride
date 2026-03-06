@@ -137,17 +137,32 @@ namespace Stride.Editor.Thumbnails
             lock (hashLock)
             {
                 thumbnailQueueHash.Remove(asset);
-                if (thumbnailsInProgressAndContinuation.ContainsKey(asset.Id) && System.Diagnostics.Debugger.IsAttached)
+                if (thumbnailsInProgressAndContinuation.ContainsKey(asset.Id))
                 {
-                    // Virgile: This case should not happen, but it happened to me once and could not reproduce.
-                    // Please let me know if it happens to you.
-                    // Note: this is likely not critical and should work fine even if it happens.
-                    System.Diagnostics.Debugger.Break();
+                    // Race condition: the builder dequeued this unit before Compile() was called, and
+                    // AddThumbnailAssetItems() created a replacement unit in that window (between the
+                    // dequeue under queueLock and this Compile() call under hashLock). Running both
+                    // concurrently would corrupt the continuation chain. Demote to a continuation so
+                    // the newer request is honoured once the current in-progress build finishes.
+                    if (thumbnailsInProgressAndContinuation[asset.Id] == null)
+                        thumbnailsInProgressAndContinuation[asset.Id] = new ThumbnailContinuation(asset, QueuePosition.First);
+                    return null;
                 }
                 thumbnailsInProgressAndContinuation[asset.Id] = null;
             }
 
-            return thumbnailCompiler.Compile(asset, gameSettings, HasStaticThumbnail(asset.Asset.GetType()));
+            try
+            {
+                return thumbnailCompiler.Compile(asset, gameSettings, HasStaticThumbnail(asset.Asset.GetType()));
+            }
+            catch
+            {
+                // If compilation setup fails unexpectedly, remove the in-progress marker so the asset
+                // is not permanently stuck (ThumbnailBuilt will never fire in this path).
+                lock (hashLock)
+                    thumbnailsInProgressAndContinuation.Remove(asset.Id);
+                throw;
+            }
         }
 
         public void AddThumbnailAssetItems(IEnumerable<AssetItem> assetItems, QueuePosition position)
@@ -267,11 +282,16 @@ namespace Stride.Editor.Thumbnails
                 while (!thumbnailThreadShouldTerminate)
                 {
                     await Task.Delay(500);
+                    int queueCount;
+                    lock (hashLock)
+                    {
+                        queueCount = thumbnailQueueHash.Count;
+                    }
                     if (currentJobToken >= 0)
                     {
-                        if (thumbnailQueueHash.Count > 0)
+                        if (queueCount > 0)
                         {
-                            EditorViewModel.Instance.Status.NotifyBackgroundJobProgress(currentJobToken, thumbnailQueueHash.Count, true);
+                            EditorViewModel.Instance.Status.NotifyBackgroundJobProgress(currentJobToken, queueCount, true);
                         }
                         else
                         {
@@ -279,7 +299,7 @@ namespace Stride.Editor.Thumbnails
                             currentJobToken = -1;
                         }
                     }
-                    else if (thumbnailQueueHash.Count > 0)
+                    else if (queueCount > 0)
                     {
                         currentJobToken = EditorViewModel.Instance.Status.NotifyBackgroundJobStarted("Building thumbnails… ({0} in queue)", JobPriority.Background);
                     }
