@@ -10,6 +10,7 @@ using Stride.Core.Collections;
 using Stride.Core.Mathematics;
 using Stride.Engine.Design;
 using Stride.Engine.Processors;
+using Stride.Graphics;
 using Stride.Rendering;
 using Stride.Updater;
 
@@ -56,6 +57,55 @@ namespace Stride.Engine
             /// The meshes current sphere box in world space.
             /// </summary>
             public BoundingSphere BoundingSphere;
+
+            // --- GPU blend shape compute shader state (used by BlendShapeGpuDeformer) ---
+
+            /// <summary>Whether GPU blend shape buffers have been initialized for this mesh.</summary>
+            public bool GpuBlendShapeInitialized;
+
+            /// <summary>GPU StructuredBuffer of base (undeformed) positions.</summary>
+            public Buffer GpuBasePositions;
+
+            /// <summary>GPU StructuredBuffer of base (undeformed) normals.</summary>
+            public Buffer GpuBaseNormals;
+
+            /// <summary>GPU StructuredBuffer of base (undeformed) tangents.</summary>
+            public Buffer GpuBaseTangents;
+
+            /// <summary>GPU StructuredBuffer of packed per-target position deltas.</summary>
+            public Buffer GpuDeltaPositions;
+
+            /// <summary>GPU StructuredBuffer of packed per-target normal deltas.</summary>
+            public Buffer GpuDeltaNormals;
+
+            /// <summary>GPU StructuredBuffer of packed per-target tangent deltas.</summary>
+            public Buffer GpuDeltaTangents;
+
+            /// <summary>GPU StructuredBuffer for active target indices (compaction).</summary>
+            public Buffer GpuActiveIndicesBuffer;
+
+            /// <summary>GPU StructuredBuffer for active target weights (compaction).</summary>
+            public Buffer GpuActiveWeightsBuffer;
+
+            /// <summary>Cloned MeshDraw with UAV-capable output vertex buffer at VB[0].</summary>
+            public MeshDraw ClonedMeshDraw;
+
+            // --- Fused blend shape + skinning state ---
+
+            /// <summary>Whether fused blend shape + skinning has been initialized.</summary>
+            public bool UseFusedSkinning;
+
+            /// <summary>GPU StructuredBuffer of per-vertex bone weights.</summary>
+            public Buffer GpuVertexBoneWeights;
+
+            /// <summary>GPU StructuredBuffer of per-vertex bone indices.</summary>
+            public Buffer GpuVertexBoneIndices;
+
+            /// <summary>CPU-side object-space bone matrices for compute shader upload.</summary>
+            public Matrix[] ObjectSpaceBoneMatrices;
+
+            /// <summary>GPU StructuredBuffer of bone matrices for compute shader.</summary>
+            public Buffer GpuBoneMatricesBuffer;
         }
 
         /// <summary>

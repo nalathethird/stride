@@ -123,7 +123,7 @@ namespace Stride.Rendering
 
                     fixed (float* weightsPtr = weights)
                     {
-                        Utilities.CopyWithAlignmentFallback(mappedCB, weightsPtr, (uint)weights.Length * sizeof(float));
+                        MemoryUtilities.CopyWithAlignmentFallback(mappedCB, weightsPtr, (uint)weights.Length * sizeof(float));
                     }
                 }
             });
