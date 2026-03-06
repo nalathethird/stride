@@ -197,6 +197,14 @@ namespace Stride.Assets.Models
                 }
             }
 
+            // Cook sparse blendshape data now that all coordinate transforms are finalised.
+            // Cook() builds the vertex-major CSR layout and applies dead-zone culling,
+            // reducing GPU VRAM usage by 10-30x for typical facial rigs.
+            foreach (var mesh in model.Meshes)
+            {
+                mesh.BlendShapes?.Cook();
+            }
+
             // Merge meshes with same parent nodes, material and skinning
             var meshesByNodes = model.Meshes.GroupBy(x => x.NodeIndex).ToList();
 
@@ -206,6 +214,7 @@ namespace Stride.Assets.Models
                 foreach (var meshesPerDrawCall in meshesByNode.GroupBy(x => x,
                     new AnonymousEqualityComparer<Mesh>((x, y) =>
                     x.MaterialIndex == y.MaterialIndex // Same material
+                    && x.BlendShapes == null && y.BlendShapes == null // Never merge meshes with blend shapes
                     && ArrayExtensions.ArraysEqual(x.Skinning?.Bones, y.Skinning?.Bones) // Same bones
                     && CompareParameters(model, x, y) // Same parameters
                     && CompareShadowOptions(model, x, y), // Same shadow parameters

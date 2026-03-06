@@ -163,11 +163,12 @@ namespace Stride.Engine.Processors
                     GraphicsResourceUsage.Default,
                     BufferFlags.RawBuffer | BufferFlags.UnorderedAccess);
 
-                // Clone MeshDraw and replace VB[0] with our UAV-capable output buffer
+                // Clone MeshDraw and replace VB[0] with our UAV-capable output buffer.
+                // Offset is 0 because the output buffer is standalone (not shared/squished).
                 meshInfo.ClonedMeshDraw = mesh.Draw.Clone();
                 var origBinding = mesh.Draw.VertexBuffers[0];
                 meshInfo.ClonedMeshDraw.VertexBuffers[0] = new VertexBufferBinding(
-                    outputBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, origBinding.Offset);
+                    outputBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, 0);
 
                 // Copy original VB content to preserve UVs, bone weights, colors, etc.
                 // The compute shader only overwrites position/normal/tangent byte ranges.
@@ -180,20 +181,31 @@ namespace Stride.Engine.Processors
         /// <summary>
         /// Copies the original vertex buffer content into the output UAV vertex buffer.
         /// Preserves all vertex attributes the compute shader doesn't touch (UVs, bone weights, etc.).
+        /// Extracts only this mesh's portion from the (potentially squished) shared VB using the binding offset.
         /// </summary>
         private void CopyOriginalVertexBufferContent(Mesh mesh, ModelComponent.MeshInfo meshInfo, int bufferSize)
         {
             if (meshInfo.ClonedMeshDraw?.VertexBuffers == null || meshInfo.ClonedMeshDraw.VertexBuffers.Length == 0)
                 return;
 
-            var sourceVB = mesh.Draw.VertexBuffers[0].Buffer;
+            var vbBinding = mesh.Draw.VertexBuffers[0];
+            var sourceVB = vbBinding.Buffer;
             var destVB = meshInfo.ClonedMeshDraw.VertexBuffers[0].Buffer;
 
-            var serializationData = sourceVB?.GetSerializationData();
-            if (serializationData?.Content != null)
-            {
-                destVB.SetData(graphicsContext.CommandList, new ReadOnlySpan<byte>(serializationData.Content));
-            }
+            // Use TryFetchBufferContent which handles runtime scenarios where
+            // GetSerializationData() returns null (GPU-uploaded buffers without CPU copy).
+            var vbData = MeshExtension.TryFetchBufferContent(sourceVB, services);
+            if (vbData == null)
+                return;
+
+            // Extract only this mesh's portion from the shared buffer.
+            // After VB squishing, vbBinding.Offset is the byte offset into the shared buffer.
+            var offset = vbBinding.Offset;
+            var copySize = Math.Min(bufferSize, vbData.Length - offset);
+            if (copySize <= 0)
+                return;
+
+            destVB.SetData(graphicsContext.CommandList, new ReadOnlySpan<byte>(vbData, offset, copySize));
         }
 
         /// <summary>
@@ -239,19 +251,21 @@ namespace Stride.Engine.Processors
             if (blendWeightOffset < 0 || blendIndicesOffset < 0)
                 return; // No skinning data in VB
 
-            // Read the original vertex buffer data to extract bone weights/indices
+            // Read the original vertex buffer data to extract bone weights/indices.
+            // Use TryFetchBufferContent for runtime compatibility (GetSerializationData may return null).
             var sourceVB = vbBinding.Buffer;
-            var serializationData = sourceVB?.GetSerializationData();
-            if (serializationData?.Content == null)
+            var vbData = MeshExtension.TryFetchBufferContent(sourceVB, services);
+            if (vbData == null)
                 return;
 
-            var vbData = serializationData.Content;
+            // Account for VB binding offset in the shared/squished buffer
+            var vbOffset = vbBinding.Offset;
             var boneWeights = new Vector4[vertexCount];
             var boneIndices = new Int4[vertexCount]; // uint4 for shader
 
             for (int v = 0; v < vertexCount; v++)
             {
-                int vertexBase = v * stride;
+                int vertexBase = vbOffset + v * stride;
 
                 // Extract bone weights (float4 = 16 bytes)
                 int wOff = vertexBase + blendWeightOffset;

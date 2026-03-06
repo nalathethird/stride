@@ -1,17 +1,24 @@
 // Copyright (c) .NET Foundation and Contributors (https://dotnetfoundation.org/ & https://stride3d.net)
 // Distributed under the MIT license. See the LICENSE.md file in the project root for more information.
 
+using System;
+using Stride.Core;
+using Stride.Core.Mathematics;
 using Stride.Engine;
+using Stride.Graphics;
 using Stride.Rendering;
 
 namespace Stride.Engine.Processors
 {
     /// <summary>
     /// Processor that syncs <see cref="BlendShapeComponent"/> weights into <see cref="ModelComponent.MeshInfo.BlendShapeWeights"/>
-    /// each frame so the render pipeline picks them up.
+    /// each frame and dispatches GPU or CPU deformation when weights change.
     /// </summary>
-    public class BlendShapeProcessor : EntityProcessor<BlendShapeComponent, BlendShapeProcessor.BlendShapeData>
+    public class BlendShapeProcessor : EntityProcessor<BlendShapeComponent, BlendShapeProcessor.BlendShapeData>, IDisposable
     {
+        private BlendShapeGpuDeformer gpuDeformer;
+        private bool useGpuDeformation;
+
         public BlendShapeProcessor()
             : base(typeof(ModelComponent))
         {
@@ -43,8 +50,32 @@ namespace Stride.Engine.Processors
             }
         }
 
+        protected override void OnEntityComponentRemoved(Entity entity, BlendShapeComponent component, BlendShapeData data)
+        {
+            // Dispose GPU buffers for this entity's meshes
+            if (data.ModelComponent?.MeshInfos != null)
+            {
+                foreach (var meshInfo in data.ModelComponent.MeshInfos)
+                {
+                    if (meshInfo.GpuBlendShapeInitialized)
+                        BlendShapeGpuDeformer.DisposeGpuBuffers(meshInfo);
+                }
+            }
+        }
+
         public override void Draw(RenderContext context)
         {
+            var graphicsDevice = Services.GetService<IGraphicsDeviceService>()?.GraphicsDevice;
+            var graphicsContext = context.GraphicsContext;
+
+            // Lazy-initialize GPU deformer
+            if (gpuDeformer == null && graphicsDevice != null && graphicsContext != null)
+            {
+                useGpuDeformation = BlendShapeGpuDeformer.IsSupported(graphicsDevice);
+                if (useGpuDeformation)
+                    gpuDeformer = new BlendShapeGpuDeformer(graphicsDevice, graphicsContext, Services);
+            }
+
             foreach (var kv in ComponentDatas)
             {
                 var data = kv.Value;
@@ -78,6 +109,7 @@ namespace Stride.Engine.Processors
                     if (mesh.BlendShapes?.Targets == null || meshInfo.BlendShapeWeights == null)
                         continue;
 
+                    // Sync component weights → meshInfo weights
                     var targets = mesh.BlendShapes.Targets;
                     for (int targetIdx = 0; targetIdx < targets.Length && targetIdx < meshInfo.BlendShapeWeights.Length; targetIdx++)
                     {
@@ -87,8 +119,82 @@ namespace Stride.Engine.Processors
                             meshInfo.BlendShapeWeights[targetIdx] = weight;
                         }
                     }
+
+                    // Dirty detection: check if weights changed since last frame
+                    bool isDirty = meshInfo.BlendShapeDirty;
+                    if (!isDirty && meshInfo.PreviousWeights != null)
+                    {
+                        for (int i = 0; i < meshInfo.BlendShapeWeights.Length && i < meshInfo.PreviousWeights.Length; i++)
+                        {
+                            if (Math.Abs(meshInfo.BlendShapeWeights[i] - meshInfo.PreviousWeights[i]) > BlendShapeGpuDeformer.WeightEpsilon)
+                            {
+                                isDirty = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Dispatch deformation
+                    bool useFused = blendShapeComponent.UseFusedSkinning && mesh.Skinning != null;
+
+                    if (useGpuDeformation && blendShapeComponent.UseGpuDeformation && gpuDeformer != null)
+                    {
+                        DeformGpu(graphicsContext, meshInfo, mesh, isDirty, useFused, modelComponent);
+                    }
+                    else if (isDirty)
+                    {
+                        BlendShapeDeformer.Deform(mesh.BlendShapes, meshInfo.BlendShapeWeights, meshInfo.DeformedVertexData);
+                    }
+
+                    // Save current weights for next frame's dirty check
+                    if (meshInfo.PreviousWeights != null)
+                        Array.Copy(meshInfo.BlendShapeWeights, meshInfo.PreviousWeights, meshInfo.BlendShapeWeights.Length);
+                    meshInfo.BlendShapeDirty = false;
                 }
             }
+        }
+
+        private void DeformGpu(GraphicsContext graphicsContext, ModelComponent.MeshInfo meshInfo,
+            Mesh mesh, bool isDirty, bool useFused, ModelComponent modelComponent)
+        {
+            // Initialize GPU buffers on first use
+            if (!meshInfo.GpuBlendShapeInitialized)
+            {
+                gpuDeformer.InitializeGpuBuffers(meshInfo, mesh.BlendShapes, mesh);
+            }
+
+            if (!meshInfo.GpuBlendShapeInitialized)
+                return;
+
+            if (useFused)
+            {
+                // Initialize fused skinning buffers once
+                if (!meshInfo.UseFusedSkinning)
+                    gpuDeformer.InitializeFusedSkinningBuffers(meshInfo, mesh);
+
+                if (meshInfo.UseFusedSkinning)
+                {
+                    // Fused path dispatches every frame (bone matrices change each frame)
+                    var skeleton = modelComponent.Skeleton;
+                    if (skeleton != null)
+                    {
+                        var meshWorld = skeleton.NodeTransformations[mesh.NodeIndex].WorldMatrix;
+                        gpuDeformer.DispatchFused(graphicsContext, meshInfo, mesh.BlendShapes,
+                            meshInfo.BlendShapeWeights, ref meshWorld);
+                    }
+                }
+            }
+            else if (isDirty)
+            {
+                // Blend-only path: dispatch only when weights changed
+                gpuDeformer.Dispatch(graphicsContext, meshInfo, mesh.BlendShapes, meshInfo.BlendShapeWeights);
+            }
+        }
+
+        public void Dispose()
+        {
+            gpuDeformer?.Dispose();
+            gpuDeformer = null;
         }
 
         public class BlendShapeData

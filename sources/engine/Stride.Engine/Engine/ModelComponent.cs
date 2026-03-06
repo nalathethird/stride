@@ -48,6 +48,18 @@ namespace Stride.Engine
             /// </summary>
             public float[] BlendShapeWeights;
 
+            /// <summary>Previous frame's blend shape weights, for dirty detection.</summary>
+            public float[] PreviousWeights;
+
+            /// <summary>Whether blend shape weights have changed since the last dispatch.</summary>
+            public bool BlendShapeDirty;
+
+            /// <summary>Whether blend shape per-entity state has been initialized.</summary>
+            public bool BlendShapeInitialized;
+
+            /// <summary>CPU staging buffer for CPU-side deformation output (matches VB[0] byte size).</summary>
+            public byte[] DeformedVertexData;
+
             /// <summary>
             /// The meshes current bounding box in world space.
             /// </summary>
@@ -268,7 +280,24 @@ namespace Stride.Engine
                         meshData.BlendMatrices = new Matrix[mesh.Skinning.Bones.Length];
 
                     if (mesh.BlendShapes?.Targets != null)
-                        meshData.BlendShapeWeights = new float[mesh.BlendShapes.Targets.Length];
+                    {
+                        var targetCount = mesh.BlendShapes.Targets.Length;
+                        meshData.BlendShapeWeights = new float[targetCount];
+                        meshData.PreviousWeights = new float[targetCount];
+                        meshData.BlendShapeDirty = true;
+                        meshData.BlendShapeInitialized = false;
+
+                        // Clone MeshDraw so this entity gets its own VB[0] for CPU deformation
+                        if (mesh.Draw != null)
+                        {
+                            meshData.ClonedMeshDraw = mesh.Draw.Clone();
+
+                            // Allocate CPU staging buffer matching VB[0] size
+                            var baseVB = mesh.Draw.VertexBuffers[0];
+                            var bufferSize = baseVB.Stride * baseVB.Count;
+                            meshData.DeformedVertexData = new byte[bufferSize];
+                        }
+                    }
                 }
 
                 if (skeleton != null)
