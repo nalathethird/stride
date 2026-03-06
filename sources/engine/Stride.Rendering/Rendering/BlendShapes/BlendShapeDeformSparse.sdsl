@@ -1,0 +1,117 @@
+// Copyright (c) .NET Foundation and Contributors (https://dotnetfoundation.org/ & https://stride3d.net)
+// Distributed under the MIT license. See the LICENSE.md file in the project root for more information.
+
+/// <summary>
+/// GPU compute shader for SPARSE blend shape vertex deformation using vertex-major CSR layout.
+///
+/// MEMORY LAYOUT: Compressed Sparse Row (vertex-major)
+///
+/// For each vertex v:
+///   VertexContribOffset[v] = start index into contribution arrays
+///   VertexContribCount[v]  = number of contributing targets
+///   ContribShapeIndices[offset..offset+count-1] = which targets contribute
+///   ContribPosDeltas[offset..offset+count-1]    = position deltas
+///   ContribNrmDeltas[offset..offset+count-1]    = normal deltas
+///   ContribTanDeltas[offset..offset+count-1]    = tangent deltas
+///
+/// ADVANTAGES OVER DENSE:
+///   - 15-30x memory reduction for typical facial rigs (5% average sparsity)
+///   - Dead-zone culled: imperceptible deltas removed at import time
+///   - Per-vertex work proportional to actual contributions, not total target count
+///
+/// TRADE-OFF:
+///   - Less coalesced memory access (contributions vary per vertex)
+///   - Weight lookup via AllWeights[shapeIndex] instead of compact active list
+///   - For very dense targets (>50% coverage), dense path may be faster
+///
+/// The CPU processor selects sparse vs dense based on CookedData availability.
+/// </summary>
+#ifndef ThreadNumberX
+# define ThreadNumberX 64
+#endif
+#ifndef ThreadNumberY
+# define ThreadNumberY 1
+#endif
+#ifndef ThreadNumberZ
+# define ThreadNumberZ 1
+#endif
+shader BlendShapeDeformSparse : ComputeShaderBase
+{
+    // --- Base mesh data (bind pose) ---
+    stage StructuredBuffer<float3> BasePositions;
+    stage StructuredBuffer<float3> BaseNormals;
+    stage StructuredBuffer<float3> BaseTangents;
+
+    // --- Sparse CSR contribution data (from CookedData, uploaded once) ---
+    stage StructuredBuffer<uint>   VertexContribOffset;
+    stage StructuredBuffer<uint>   VertexContribCount;
+    stage StructuredBuffer<uint>   ContribShapeIndices;
+    stage StructuredBuffer<float3> ContribPosDeltas;
+    stage StructuredBuffer<float3> ContribNrmDeltas;
+    stage StructuredBuffer<float3> ContribTanDeltas;
+
+    // --- Full weight array (all targets, indexed by shape index) ---
+    stage StructuredBuffer<float> AllWeights;
+
+    // --- Output vertex buffer ---
+    stage RWByteAddressBuffer OutputVertexBuffer;
+
+    // --- Uniforms ---
+    cbuffer BlendShapeSparseParams
+    {
+        stage int VertexCount;
+        stage int VertexStride;
+        stage int PositionOffset;
+        stage int NormalOffset;
+        stage int TangentOffset;
+    };
+
+    override void Compute()
+    {
+        uint vertexId = streams.DispatchThreadId.x;
+        if (vertexId >= (uint)VertexCount)
+            return;
+
+        // Load base mesh data
+        float3 pos = BasePositions[vertexId];
+        float3 nrm = BaseNormals[vertexId];
+        float3 tan = float3(0, 0, 0);
+        bool hasTan = TangentOffset >= 0;
+        if (hasTan)
+            tan = BaseTangents[vertexId];
+
+        // Read this vertex's contribution range from CSR table
+        uint contribStart = VertexContribOffset[vertexId];
+        uint contribCount = VertexContribCount[vertexId];
+
+        // Accumulate weighted deltas from contributing targets only
+        for (uint c = 0; c < contribCount; c++)
+        {
+            uint idx = contribStart + c;
+            uint shapeIdx = ContribShapeIndices[idx];
+            float w = AllWeights[shapeIdx];
+
+            // Skip zero-weight targets (common for animation — most shapes inactive)
+            if (abs(w) < 0.0001f)
+                continue;
+
+            pos += ContribPosDeltas[idx] * w;
+            nrm += ContribNrmDeltas[idx] * w;
+            if (hasTan)
+                tan += ContribTanDeltas[idx] * w;
+        }
+
+        // Normalize direction vectors
+        nrm = normalize(nrm);
+        if (hasTan)
+            tan = normalize(tan);
+
+        // Store to interleaved output vertex buffer
+        uint baseAddr = vertexId * (uint)VertexStride;
+
+        OutputVertexBuffer.Store3(baseAddr + (uint)PositionOffset, asuint(pos));
+        OutputVertexBuffer.Store3(baseAddr + (uint)NormalOffset, asuint(nrm));
+        if (hasTan)
+            OutputVertexBuffer.Store3(baseAddr + (uint)TangentOffset, asuint(tan));
+    }
+};

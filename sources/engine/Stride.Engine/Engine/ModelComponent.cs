@@ -118,6 +118,32 @@ namespace Stride.Engine
 
             /// <summary>GPU StructuredBuffer of bone matrices for compute shader.</summary>
             public Buffer GpuBoneMatricesBuffer;
+
+            // --- Sparse CSR blend shape state ---
+
+            /// <summary>Whether the sparse GPU path is active for this mesh.</summary>
+            public bool UseSparseGpuPath;
+
+            /// <summary>GPU buffer: per-vertex offset into contribution arrays.</summary>
+            public Buffer GpuSparseVertexOffset;
+
+            /// <summary>GPU buffer: per-vertex contribution count.</summary>
+            public Buffer GpuSparseVertexCount;
+
+            /// <summary>GPU buffer: flat array of contributing shape indices.</summary>
+            public Buffer GpuSparseShapeIndices;
+
+            /// <summary>GPU buffer: flat array of position deltas for contributions.</summary>
+            public Buffer GpuSparsePosDeltas;
+
+            /// <summary>GPU buffer: flat array of normal deltas for contributions.</summary>
+            public Buffer GpuSparseNrmDeltas;
+
+            /// <summary>GPU buffer: flat array of tangent deltas for contributions.</summary>
+            public Buffer GpuSparseTanDeltas;
+
+            /// <summary>GPU buffer: full weight array for all targets.</summary>
+            public Buffer GpuAllWeightsBuffer;
         }
 
         /// <summary>

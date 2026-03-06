@@ -160,11 +160,23 @@ namespace Stride.Engine.Processors
             // Initialize GPU buffers on first use
             if (!meshInfo.GpuBlendShapeInitialized)
             {
-                gpuDeformer.InitializeGpuBuffers(meshInfo, mesh.BlendShapes, mesh);
+                // Prefer sparse CSR path when cooked data is available
+                if (mesh.BlendShapes?.CookedData != null)
+                    gpuDeformer.InitializeGpuBuffersSparse(meshInfo, mesh.BlendShapes, mesh);
+                else
+                    gpuDeformer.InitializeGpuBuffers(meshInfo, mesh.BlendShapes, mesh);
             }
 
             if (!meshInfo.GpuBlendShapeInitialized)
                 return;
+
+            // Sparse path: weight check is inside the shader, dispatch every dirty frame
+            if (meshInfo.UseSparseGpuPath)
+            {
+                if (isDirty)
+                    gpuDeformer.DispatchSparse(graphicsContext, meshInfo, mesh.BlendShapes, meshInfo.BlendShapeWeights);
+                return;
+            }
 
             if (useFused)
             {
