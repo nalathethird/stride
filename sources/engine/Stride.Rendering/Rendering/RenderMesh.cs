@@ -13,6 +13,13 @@ namespace Stride.Rendering
     {
         public MeshDraw ActiveMeshDraw;
 
+        /// <summary>
+        /// Per-entity override for <see cref="ActiveMeshDraw"/>.
+        /// When set (e.g. for CPU blend shape deformation), <see cref="MeshRenderFeature"/> will use
+        /// this instead of <see cref="Mesh"/>.<see cref="Rendering.Mesh.Draw"/>.
+        /// </summary>
+        public MeshDraw OverrideMeshDraw;
+
         public RenderModel RenderModel;
 
         /// <summary>
@@ -37,7 +44,13 @@ namespace Stride.Rendering
 
         public Matrix[] BlendMatrices;
 
-        public float[] BlendShapeWeights;
+        /// <summary>
+        /// When true, vertex shader skinning is suppressed for this mesh.
+        /// Set by the blend shape processor when fused compute skinning is active —
+        /// the compute shader has already applied skeletal skinning, so the VS
+        /// should use the standard non-skinned transform path (World * Position).
+        /// </summary>
+        public bool SkipVsSkinning;
 
         public int InstanceCount;
     }

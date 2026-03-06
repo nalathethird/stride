@@ -82,7 +82,17 @@ namespace Stride.Rendering
                     if (renderEffect == null || !renderEffect.IsUsedDuringThisFrame(RenderSystem))
                         continue;
 
-                    if (renderMesh.Mesh.Skinning != null)
+                    if (renderMesh.SkipVsSkinning)
+                    {
+                        // Fused compute skinning is active — suppress VS skinning so the vertex
+                        // shader uses the standard non-skinned transform path (World * Position).
+                        // The compute shader has already applied both blend shapes and skeletal
+                        // skinning, outputting object-space positions/normals/tangents.
+                        renderEffect.EffectValidator.ValidateParameter(MaterialKeys.HasSkinningPosition, false);
+                        renderEffect.EffectValidator.ValidateParameter(MaterialKeys.HasSkinningNormal, false);
+                        renderEffect.EffectValidator.ValidateParameter(MaterialKeys.HasSkinningTangent, false);
+                    }
+                    else if (renderMesh.Mesh.Skinning != null)
                     {
                         renderEffect.EffectValidator.ValidateParameter(MaterialKeys.HasSkinningPosition, skinningInfo.HasSkinningPosition);
                         renderEffect.EffectValidator.ValidateParameter(MaterialKeys.HasSkinningNormal, skinningInfo.HasSkinningNormal);

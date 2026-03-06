@@ -1,0 +1,15 @@
+!TemplateSample
+Id: A7B3E2D4-8F1C-4A2E-B9D3-5C6F7E8A1B2D
+Name: "Sample: blend shapes (morph targets)"
+Scope: Session
+Description: Demonstrates blend shapes (morph targets) on a model at runtime
+FullDescription: |
+   This sample demonstrates how to use blend shapes (morph targets) in Stride.
+   It shows how to import a model with morph targets, control blend shape weights
+   from C# at runtime using BlendShapeWeightScript, and how the BlendShapeComponent
+   is automatically added to entities whose models contain morph targets.
+
+   To use this sample, provide your own FBX model with morph targets in the
+   Resources folder and add it to the scene.
+Group: Samples/Graphics
+DefaultOutputName: BlendShapeDemo

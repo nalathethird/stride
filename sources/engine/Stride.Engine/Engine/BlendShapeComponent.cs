@@ -21,6 +21,7 @@ namespace Stride.Engine
     [DataContract("BlendShapeComponent")]
     [Display("Blend Shapes", Expand = ExpandRule.Once)]
     [DefaultEntityComponentProcessor(typeof(BlendShapeProcessor), ExecutionMode = ExecutionMode.Runtime | ExecutionMode.Thumbnail | ExecutionMode.Preview)]
+    [RequireComponent(typeof(ModelComponent))]
     [ComponentOrder(11100)]
     [ComponentCategory("Model")]
     public sealed class BlendShapeComponent : ActivableEntityComponent
@@ -36,6 +37,36 @@ namespace Stride.Engine
         [MemberCollection(ReadOnly = false)]
         [DataMemberUpdatable]
         public Dictionary<string, float> Weights { get; } = new Dictionary<string, float>();
+
+        /// <summary>
+        /// When true (default), blend shape deformation runs on the GPU via a compute shader.
+        /// When false, falls back to CPU-side multi-threaded deformation.
+        /// Set to false for debugging or on platforms without compute shader support.
+        /// </summary>
+        /// <userdoc>Use GPU compute shader for blend shape deformation. Disable to fall back to CPU.</userdoc>
+        [DataMember(20)]
+        [DefaultValue(true)]
+        [Display("GPU Deformation")]
+        public bool UseGpuDeformation { get; set; } = true;
+
+        /// <summary>
+        /// When true (default), blend shapes and skeletal skinning are fused into a single
+        /// compute shader dispatch for skinned meshes. This eliminates the vertex shader
+        /// skinning pass, reducing GPU memory bandwidth and vertex processing cost.
+        ///
+        /// When false, blend shapes run in a compute shader and skinning runs in the vertex
+        /// shader as separate passes. This mode only dispatches compute when weights change
+        /// (cheaper for static blend shapes on animated skeletons).
+        ///
+        /// Recommendation:
+        /// - Facial animation (weights change every frame): use fused mode (default)
+        /// - Static blend shapes on animated body: consider disabling fused mode
+        /// </summary>
+        /// <userdoc>Fuse blend shapes and skeletal skinning into one GPU compute pass. Best for facial animation.</userdoc>
+        [DataMember(30)]
+        [DefaultValue(true)]
+        [Display("Fused Skinning")]
+        public bool UseFusedSkinning { get; set; } = true;
 
         /// <summary>
         /// Initializes the weight dictionary from the blend shape definitions on the model.
@@ -104,8 +135,16 @@ namespace Stride.Engine
         /// Flat weight array indexed by target index, targetable by the animation system.
         /// The animation property path is <c>[BlendShapeComponent.Key].WeightValues[i]</c>.
         /// </summary>
-        [DataMemberIgnore]
+        [DataMemberIgnore, DataMemberUpdatable]
         public float[] WeightValues { get; internal set; } = Array.Empty<float>();
+
+        /// <summary>
+        /// Revision counter incremented whenever weights are changed via <see cref="SetWeight"/> or
+        /// the <see cref="Weights"/> dictionary is modified directly, so the processor knows to
+        /// sync dictionary → array before the next deformation pass.
+        /// </summary>
+        [DataMemberIgnore]
+        internal int DictionaryRevision { get; set; }
 
         /// <summary>
         /// Gets or sets the weight for a specific blend shape target by name.
@@ -124,7 +163,9 @@ namespace Stride.Engine
         /// <param name="weight">The weight value (typically 0.0 to 1.0).</param>
         public void SetWeight(string targetName, float weight)
         {
+            weight = Math.Clamp(weight, 0.0f, 2.0f); // Allow slight over-drive but cap at 2×
             Weights[targetName] = weight;
+            DictionaryRevision++;
         }
     }
 }

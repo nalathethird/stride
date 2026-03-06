@@ -25,6 +25,8 @@ namespace Stride.Assets.Models
 
         public bool MergeMeshes { get; set; }
 
+        public bool ImportBlendShapes { get; set; } = true;
+
         public bool Allow32BitIndex { get; set; }
         public int MaxInputSlots { get; set; }
         public bool DeduplicateMaterials { get; set; }
@@ -119,6 +121,9 @@ namespace Stride.Assets.Models
                     {
                         mesh.Draw.VertexBuffers[vbIdx].TransformBuffer(ref transformationMatrix);
                     }
+
+                    // Keep blend shape CPU data in the same coordinate space as the GPU vertex buffer
+                    mesh.BlendShapes?.ApplyTransform(ref transformationMatrix);
                 }
 
                 var skinning = mesh.Skinning;
@@ -170,6 +175,9 @@ namespace Stride.Assets.Models
                         mesh.Draw.VertexBuffers[vbIdx].TransformBuffer(ref transformationMatrix);
                     }
 
+                    // Keep blend shape CPU data in the same coordinate space as the GPU vertex buffer
+                    mesh.BlendShapes?.ApplyTransform(ref transformationMatrix);
+
                     // Check if geometry is inverted, to know if we need to reverse winding order
                     // TODO: What to do if there is no index buffer? We should create one... (not happening yet)
                     if (mesh.Draw.IndexBuffer == null)
@@ -186,6 +194,12 @@ namespace Stride.Assets.Models
 
                 // Update new node index using real asset skeleton
                 mesh.NodeIndex = skeletonMapping.SourceToTarget[mesh.NodeIndex];
+
+                // Strip blend shape data if the toggle is disabled
+                if (!ImportBlendShapes)
+                {
+                    mesh.BlendShapes = null;
+                }
             }
 
             // Apply custom model modifiers

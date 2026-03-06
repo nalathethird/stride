@@ -88,7 +88,132 @@ namespace Stride.Engine.Processors
                 ThreadNumbers = new Int3(ThreadGroupSize, 1, 1),
             };
 
+            sparseComputeEffect = new ComputeEffectShader(renderContext)
+            {
+                ShaderSourceName = "BlendShapeDeformSparse",
+                ThreadNumbers = new Int3(ThreadGroupSize, 1, 1),
+            };
+
             isInitialized = true;
+        }
+
+        /// <summary>
+        /// Creates GPU-resident StructuredBuffers for the sparse CSR blendshape path.
+        /// Called once per entity per mesh when the model is first used and cooked data is available.
+        /// Uploads the vertex-CSR layout, contribution lists, and base attributes.
+        /// Falls through to <see cref="InitializeGpuBuffers"/> for the shared output-VB setup.
+        /// </summary>
+        public void InitializeGpuBuffersSparse(ModelComponent.MeshInfo meshInfo, MeshBlendShapeDefinition definition, Mesh mesh)
+        {
+            if (meshInfo.GpuSparseInitialized)
+                return;
+
+            var cooked = definition?.CookedData;
+            if (cooked == null || mesh?.Draw?.VertexBuffers == null)
+                return;
+
+            var targetCount = definition.Targets?.Length ?? 1;
+
+            // --- Base mesh buffers (shared with dense path) ---
+            meshInfo.GpuBasePositions = Buffer.Structured.New(graphicsDevice, definition.BasePositions);
+            meshInfo.GpuBaseNormals   = Buffer.Structured.New(graphicsDevice, definition.BaseNormals);
+            if (definition.BaseTangents != null)
+                meshInfo.GpuBaseTangents = Buffer.Structured.New(graphicsDevice, definition.BaseTangents);
+
+            // --- Sparse CSR vertex table (immutable) ---
+            meshInfo.GpuSparseVertexOffset = Buffer.Structured.New(graphicsDevice, cooked.VertexContribOffset);
+            meshInfo.GpuSparseVertexCount  = Buffer.Structured.New(graphicsDevice, cooked.VertexContribCount);
+
+            // --- Flat contribution arrays (immutable) ---
+            meshInfo.GpuSparseShapeIndices = Buffer.Structured.New(graphicsDevice, cooked.ContribShapeIndices);
+            meshInfo.GpuSparsePosDeltas    = Buffer.Structured.New(graphicsDevice, cooked.ContribPosDeltas);
+            meshInfo.GpuSparseNrmDeltas    = Buffer.Structured.New(graphicsDevice, cooked.ContribNrmDeltas);
+            if (cooked.HasTangentContribs && cooked.ContribTanDeltas != null)
+                meshInfo.GpuSparseTanDeltas = Buffer.Structured.New(graphicsDevice, cooked.ContribTanDeltas);
+
+            // Dynamic weight buffer — full target count, updated every dirty frame.
+            meshInfo.GpuAllWeightsBuffer = Buffer.Structured.New<float>(graphicsDevice, Math.Max(1, targetCount));
+
+            // --- Output vertex buffer (UAV + raw, used by draw calls and written by compute) ---
+            if (mesh.Draw.VertexBuffers.Length > 0)
+            {
+                var baseVB     = mesh.Draw.VertexBuffers[0];
+                var bufferSize = baseVB.Stride * baseVB.Count;
+
+                var outputBuffer = Buffer.Vertex.New(
+                    graphicsDevice,
+                    bufferSize,
+                    GraphicsResourceUsage.Default,
+                    BufferFlags.RawBuffer | BufferFlags.UnorderedAccess);
+
+                meshInfo.ClonedMeshDraw = mesh.Draw.Clone();
+                var origBinding = mesh.Draw.VertexBuffers[0];
+                meshInfo.ClonedMeshDraw.VertexBuffers[0] = new VertexBufferBinding(
+                    outputBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, origBinding.Offset);
+
+                CopyOriginalVertexBufferContent(mesh, meshInfo, bufferSize);
+            }
+
+            meshInfo.GpuSparseInitialized    = true;
+            meshInfo.GpuBlendShapeInitialized = true;
+        }
+
+        /// <summary>
+        /// Dispatches the sparse CSR blendshape compute shader.
+        /// Uploads the full weight array (all targets, ~200–500 B for typical rigs) and
+        /// dispatches one thread per vertex. Only vertices with non-zero contributions are
+        /// affected; unaffected vertices exit immediately inside the shader.
+        /// </summary>
+        public void DispatchSparse(GraphicsContext graphicsContext, ModelComponent.MeshInfo meshInfo,
+            MeshBlendShapeDefinition definition, float[] weights)
+        {
+            if (!meshInfo.GpuSparseInitialized || definition?.CookedData == null || weights == null)
+                return;
+
+            EnsureInitialized(graphicsContext);
+
+            var commandList  = graphicsContext.CommandList;
+            var cooked       = definition.CookedData;
+            var vertexCount  = definition.VertexCount;
+            var hasTangents  = cooked.HasTangentContribs && meshInfo.GpuSparseTanDeltas != null && meshInfo.GpuBaseTangents != null;
+
+            // Upload the full weights array (indexed by original target index).
+            // Small upload: max-128-shape rig = 512 B — negligible bandwidth cost.
+            int targetCount = definition.Targets?.Length ?? weights.Length;
+            if (weights.Length < targetCount)
+            {
+                var paddedWeights = new float[targetCount];
+                Array.Copy(weights, paddedWeights, weights.Length);
+                meshInfo.GpuAllWeightsBuffer.SetData(commandList, new ReadOnlySpan<float>(paddedWeights));
+            }
+            else
+            {
+                meshInfo.GpuAllWeightsBuffer.SetData(commandList, new ReadOnlySpan<float>(weights, 0, targetCount));
+            }
+
+            var outputBuffer = meshInfo.ClonedMeshDraw.VertexBuffers[0].Buffer;
+
+            var parameters = sparseComputeEffect.Parameters;
+            parameters.Set(BlendShapeDeformSparseKeys.BasePositions,      meshInfo.GpuBasePositions);
+            parameters.Set(BlendShapeDeformSparseKeys.BaseNormals,        meshInfo.GpuBaseNormals);
+            parameters.Set(BlendShapeDeformSparseKeys.BaseTangents,       hasTangents ? meshInfo.GpuBaseTangents : meshInfo.GpuBaseNormals);
+            parameters.Set(BlendShapeDeformSparseKeys.VertexContribOffset, meshInfo.GpuSparseVertexOffset);
+            parameters.Set(BlendShapeDeformSparseKeys.VertexContribCount,  meshInfo.GpuSparseVertexCount);
+            parameters.Set(BlendShapeDeformSparseKeys.ContribShapeIndices, meshInfo.GpuSparseShapeIndices);
+            parameters.Set(BlendShapeDeformSparseKeys.ContribPosDeltas,    meshInfo.GpuSparsePosDeltas);
+            parameters.Set(BlendShapeDeformSparseKeys.ContribNrmDeltas,    meshInfo.GpuSparseNrmDeltas);
+            parameters.Set(BlendShapeDeformSparseKeys.ContribTanDeltas,    hasTangents ? meshInfo.GpuSparseTanDeltas : meshInfo.GpuSparseNrmDeltas);
+            parameters.Set(BlendShapeDeformSparseKeys.AllWeights,          meshInfo.GpuAllWeightsBuffer);
+            parameters.Set(BlendShapeDeformSparseKeys.OutputVertexBuffer,  outputBuffer);
+            parameters.Set(BlendShapeDeformSparseKeys.VertexCount,    vertexCount);
+            parameters.Set(BlendShapeDeformSparseKeys.VertexStride,   definition.VertexStride);
+            parameters.Set(BlendShapeDeformSparseKeys.PositionOffset, definition.PositionOffset);
+            parameters.Set(BlendShapeDeformSparseKeys.NormalOffset,   definition.NormalOffset);
+            parameters.Set(BlendShapeDeformSparseKeys.TangentOffset,  hasTangents ? definition.TangentOffset : -1);
+
+            var groupCountX = (vertexCount + ThreadGroupSize - 1) / ThreadGroupSize;
+            sparseComputeEffect.ThreadGroupCounts = new Int3(groupCountX, 1, 1);
+            sparseComputeEffect.Draw(renderDrawContext);
         }
 
         /// <summary>
@@ -164,12 +289,11 @@ namespace Stride.Engine.Processors
                     GraphicsResourceUsage.Default,
                     BufferFlags.RawBuffer | BufferFlags.UnorderedAccess);
 
-                // Clone MeshDraw and replace VB[0] with our UAV-capable output buffer.
-                // Offset is 0 because the output buffer is standalone (not shared/squished).
+                // Clone MeshDraw and replace VB[0] with our UAV-capable output buffer
                 meshInfo.ClonedMeshDraw = mesh.Draw.Clone();
                 var origBinding = mesh.Draw.VertexBuffers[0];
                 meshInfo.ClonedMeshDraw.VertexBuffers[0] = new VertexBufferBinding(
-                    outputBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, 0);
+                    outputBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, origBinding.Offset);
 
                 // Copy original VB content to preserve UVs, bone weights, colors, etc.
                 // The compute shader only overwrites position/normal/tangent byte ranges.
@@ -180,160 +304,22 @@ namespace Stride.Engine.Processors
         }
 
         /// <summary>
-        /// Creates GPU-resident StructuredBuffers for the SPARSE (CSR) blend shape path.
-        /// Uses pre-cooked vertex-major CSR data from <see cref="BlendShapeCookedData"/>.
-        /// Memory usage is 15-30x less than dense for typical facial rigs.
-        /// Called once per entity per mesh when the model is first used and CookedData is available.
-        /// </summary>
-        public void InitializeGpuBuffersSparse(ModelComponent.MeshInfo meshInfo, MeshBlendShapeDefinition definition, Mesh mesh)
-        {
-            if (meshInfo.GpuBlendShapeInitialized)
-                return;
-
-            var cooked = definition?.CookedData;
-            if (cooked == null || definition.Targets == null || definition.Targets.Length == 0 || mesh?.Draw?.VertexBuffers == null)
-                return;
-
-            var vertexCount = definition.VertexCount;
-            var targetCount = definition.Targets.Length;
-            var hasTangents = definition.TangentOffset >= 0 && definition.BaseTangents != null;
-
-            // --- Base mesh StructuredBuffers (same as dense path) ---
-            meshInfo.GpuBasePositions = Buffer.Structured.New(graphicsDevice, definition.BasePositions);
-            meshInfo.GpuBaseNormals = Buffer.Structured.New(graphicsDevice, definition.BaseNormals);
-
-            if (hasTangents)
-            {
-                meshInfo.GpuBaseTangents = Buffer.Structured.New(graphicsDevice, definition.BaseTangents);
-            }
-
-            // --- Sparse CSR contribution data (from CookedData, immutable) ---
-            meshInfo.GpuSparseVertexOffset = Buffer.Structured.New(graphicsDevice, cooked.VertexContribOffset);
-            meshInfo.GpuSparseVertexCount = Buffer.Structured.New(graphicsDevice, cooked.VertexContribCount);
-            meshInfo.GpuSparseShapeIndices = Buffer.Structured.New(graphicsDevice, cooked.ContribShapeIndices);
-            meshInfo.GpuSparsePosDeltas = Buffer.Structured.New(graphicsDevice, cooked.ContribPosDeltas);
-            meshInfo.GpuSparseNrmDeltas = Buffer.Structured.New(graphicsDevice, cooked.ContribNrmDeltas);
-
-            if (hasTangents && cooked.HasTangentContribs)
-            {
-                meshInfo.GpuSparseTanDeltas = Buffer.Structured.New(graphicsDevice, cooked.ContribTanDeltas);
-            }
-
-            // --- Full weight buffer (all targets, updated per dirty frame) ---
-            meshInfo.GpuAllWeightsBuffer = Buffer.Structured.New<float>(graphicsDevice, targetCount);
-
-            // --- Output vertex buffer (same as dense path) ---
-            if (mesh.Draw.VertexBuffers.Length > 0)
-            {
-                var baseVB = mesh.Draw.VertexBuffers[0];
-                var bufferSize = baseVB.Stride * baseVB.Count;
-
-                var outputBuffer = Buffer.Vertex.New(
-                    graphicsDevice,
-                    bufferSize,
-                    GraphicsResourceUsage.Default,
-                    BufferFlags.RawBuffer | BufferFlags.UnorderedAccess);
-
-                meshInfo.ClonedMeshDraw = mesh.Draw.Clone();
-                var origBinding = mesh.Draw.VertexBuffers[0];
-                meshInfo.ClonedMeshDraw.VertexBuffers[0] = new VertexBufferBinding(
-                    outputBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, 0);
-
-                CopyOriginalVertexBufferContent(mesh, meshInfo, bufferSize);
-            }
-
-            meshInfo.GpuBlendShapeInitialized = true;
-            meshInfo.UseSparseGpuPath = true;
-        }
-
-        /// <summary>
-        /// Dispatches the SPARSE compute shader to deform the vertex buffer.
-        /// Uploads the full weight array (shader indexes by shape index from CSR data).
-        /// Per-vertex work is proportional to actual contributions, not total target count.
-        /// </summary>
-        public void DispatchSparse(GraphicsContext graphicsContext, ModelComponent.MeshInfo meshInfo,
-            MeshBlendShapeDefinition definition, float[] weights)
-        {
-            if (!meshInfo.GpuBlendShapeInitialized || !meshInfo.UseSparseGpuPath || definition == null || weights == null)
-                return;
-
-            EnsureInitialized(graphicsContext);
-
-            if (sparseComputeEffect == null)
-            {
-                sparseComputeEffect = new ComputeEffectShader(renderContext)
-                {
-                    ShaderSourceName = "BlendShapeDeformSparse",
-                    ThreadNumbers = new Int3(ThreadGroupSize, 1, 1),
-                };
-            }
-
-            var commandList = graphicsContext.CommandList;
-            var vertexCount = definition.VertexCount;
-            var hasTangents = definition.TangentOffset >= 0 && definition.BaseTangents != null
-                && definition.CookedData?.HasTangentContribs == true;
-
-            // Upload full weight array (shader reads via ContribShapeIndices[idx])
-            meshInfo.GpuAllWeightsBuffer.SetData(commandList, new ReadOnlySpan<float>(weights));
-
-            var outputBuffer = meshInfo.ClonedMeshDraw.VertexBuffers[0].Buffer;
-
-            // --- Set sparse compute shader parameters ---
-            var parameters = sparseComputeEffect.Parameters;
-
-            parameters.Set(BlendShapeDeformSparseKeys.BasePositions, meshInfo.GpuBasePositions);
-            parameters.Set(BlendShapeDeformSparseKeys.BaseNormals, meshInfo.GpuBaseNormals);
-            parameters.Set(BlendShapeDeformSparseKeys.BaseTangents, hasTangents ? meshInfo.GpuBaseTangents : meshInfo.GpuBaseNormals);
-
-            parameters.Set(BlendShapeDeformSparseKeys.VertexContribOffset, meshInfo.GpuSparseVertexOffset);
-            parameters.Set(BlendShapeDeformSparseKeys.VertexContribCount, meshInfo.GpuSparseVertexCount);
-            parameters.Set(BlendShapeDeformSparseKeys.ContribShapeIndices, meshInfo.GpuSparseShapeIndices);
-            parameters.Set(BlendShapeDeformSparseKeys.ContribPosDeltas, meshInfo.GpuSparsePosDeltas);
-            parameters.Set(BlendShapeDeformSparseKeys.ContribNrmDeltas, meshInfo.GpuSparseNrmDeltas);
-            parameters.Set(BlendShapeDeformSparseKeys.ContribTanDeltas, hasTangents ? meshInfo.GpuSparseTanDeltas : meshInfo.GpuSparseNrmDeltas);
-
-            parameters.Set(BlendShapeDeformSparseKeys.AllWeights, meshInfo.GpuAllWeightsBuffer);
-            parameters.Set(BlendShapeDeformSparseKeys.OutputVertexBuffer, outputBuffer);
-
-            parameters.Set(BlendShapeDeformSparseKeys.VertexCount, vertexCount);
-            parameters.Set(BlendShapeDeformSparseKeys.VertexStride, definition.VertexStride);
-            parameters.Set(BlendShapeDeformSparseKeys.PositionOffset, definition.PositionOffset);
-            parameters.Set(BlendShapeDeformSparseKeys.NormalOffset, definition.NormalOffset);
-            parameters.Set(BlendShapeDeformSparseKeys.TangentOffset, hasTangents ? definition.TangentOffset : -1);
-
-            var groupCountX = (vertexCount + ThreadGroupSize - 1) / ThreadGroupSize;
-            sparseComputeEffect.ThreadGroupCounts = new Int3(groupCountX, 1, 1);
-            sparseComputeEffect.Draw(renderDrawContext);
-        }
-
-        /// <summary>
         /// Copies the original vertex buffer content into the output UAV vertex buffer.
         /// Preserves all vertex attributes the compute shader doesn't touch (UVs, bone weights, etc.).
-        /// Extracts only this mesh's portion from the (potentially squished) shared VB using the binding offset.
         /// </summary>
         private void CopyOriginalVertexBufferContent(Mesh mesh, ModelComponent.MeshInfo meshInfo, int bufferSize)
         {
             if (meshInfo.ClonedMeshDraw?.VertexBuffers == null || meshInfo.ClonedMeshDraw.VertexBuffers.Length == 0)
                 return;
 
-            var vbBinding = mesh.Draw.VertexBuffers[0];
-            var sourceVB = vbBinding.Buffer;
+            var sourceVB = mesh.Draw.VertexBuffers[0].Buffer;
             var destVB = meshInfo.ClonedMeshDraw.VertexBuffers[0].Buffer;
 
-            // Use TryFetchBufferContent which handles runtime scenarios where
-            // GetSerializationData() returns null (GPU-uploaded buffers without CPU copy).
-            var vbData = MeshExtension.TryFetchBufferContent(sourceVB, services);
-            if (vbData == null)
-                return;
-
-            // Extract only this mesh's portion from the shared buffer.
-            // After VB squishing, vbBinding.Offset is the byte offset into the shared buffer.
-            var offset = vbBinding.Offset;
-            var copySize = Math.Min(bufferSize, vbData.Length - offset);
-            if (copySize <= 0)
-                return;
-
-            destVB.SetData(graphicsContext.CommandList, new ReadOnlySpan<byte>(vbData, offset, copySize));
+            var serializationData = sourceVB?.GetSerializationData();
+            if (serializationData?.Content != null)
+            {
+                destVB.SetData(graphicsContext.CommandList, new ReadOnlySpan<byte>(serializationData.Content));
+            }
         }
 
         /// <summary>
@@ -379,21 +365,19 @@ namespace Stride.Engine.Processors
             if (blendWeightOffset < 0 || blendIndicesOffset < 0)
                 return; // No skinning data in VB
 
-            // Read the original vertex buffer data to extract bone weights/indices.
-            // Use TryFetchBufferContent for runtime compatibility (GetSerializationData may return null).
+            // Read the original vertex buffer data to extract bone weights/indices
             var sourceVB = vbBinding.Buffer;
-            var vbData = MeshExtension.TryFetchBufferContent(sourceVB, services);
-            if (vbData == null)
+            var serializationData = sourceVB?.GetSerializationData();
+            if (serializationData?.Content == null)
                 return;
 
-            // Account for VB binding offset in the shared/squished buffer
-            var vbOffset = vbBinding.Offset;
+            var vbData = serializationData.Content;
             var boneWeights = new Vector4[vertexCount];
             var boneIndices = new Int4[vertexCount]; // uint4 for shader
 
             for (int v = 0; v < vertexCount; v++)
             {
-                int vertexBase = vbOffset + v * stride;
+                int vertexBase = v * stride;
 
                 // Extract bone weights (float4 = 16 bytes)
                 int wOff = vertexBase + blendWeightOffset;
@@ -414,14 +398,27 @@ namespace Stride.Engine.Processors
                         BitConverter.ToUInt16(vbData, iOff + 4),
                         BitConverter.ToUInt16(vbData, iOff + 6));
                 }
-                else
+                else if (blendIndicesFormat == PixelFormat.R8G8B8A8_UInt || blendIndicesFormat == PixelFormat.R8G8B8A8_UNorm)
                 {
-                    // Assume uint4 (R32G32B32A32_UInt) — 16 bytes
+                    // byte4 → uint4
+                    boneIndices[v] = new Int4(
+                        vbData[iOff],
+                        vbData[iOff + 1],
+                        vbData[iOff + 2],
+                        vbData[iOff + 3]);
+                }
+                else if (blendIndicesFormat == PixelFormat.R32G32B32A32_UInt || blendIndicesFormat == PixelFormat.R32G32B32A32_Float)
+                {
+                    // uint4 (R32G32B32A32_UInt) — 16 bytes
                     boneIndices[v] = new Int4(
                         BitConverter.ToInt32(vbData, iOff),
                         BitConverter.ToInt32(vbData, iOff + 4),
                         BitConverter.ToInt32(vbData, iOff + 8),
                         BitConverter.ToInt32(vbData, iOff + 12));
+                }
+                else
+                {
+                    throw new InvalidOperationException($"BlendShape fused skinning extraction does not support bone indices format: {blendIndicesFormat}");
                 }
             }
 
@@ -685,30 +682,6 @@ namespace Stride.Engine.Processors
             meshInfo.ObjectSpaceBoneMatrices = null;
             meshInfo.UseFusedSkinning = false;
 
-            // Dispose sparse CSR buffers
-            meshInfo.GpuSparseVertexOffset?.Dispose();
-            meshInfo.GpuSparseVertexOffset = null;
-
-            meshInfo.GpuSparseVertexCount?.Dispose();
-            meshInfo.GpuSparseVertexCount = null;
-
-            meshInfo.GpuSparseShapeIndices?.Dispose();
-            meshInfo.GpuSparseShapeIndices = null;
-
-            meshInfo.GpuSparsePosDeltas?.Dispose();
-            meshInfo.GpuSparsePosDeltas = null;
-
-            meshInfo.GpuSparseNrmDeltas?.Dispose();
-            meshInfo.GpuSparseNrmDeltas = null;
-
-            meshInfo.GpuSparseTanDeltas?.Dispose();
-            meshInfo.GpuSparseTanDeltas = null;
-
-            meshInfo.GpuAllWeightsBuffer?.Dispose();
-            meshInfo.GpuAllWeightsBuffer = null;
-
-            meshInfo.UseSparseGpuPath = false;
-
             // Dispose the output vertex buffer in the cloned MeshDraw
             if (meshInfo.ClonedMeshDraw?.VertexBuffers != null)
             {
@@ -718,6 +691,16 @@ namespace Stride.Engine.Processors
                 }
             }
             meshInfo.ClonedMeshDraw = null;
+
+            // Sparse buffers
+            meshInfo.GpuSparseVertexOffset?.Dispose(); meshInfo.GpuSparseVertexOffset = null;
+            meshInfo.GpuSparseVertexCount?.Dispose();  meshInfo.GpuSparseVertexCount  = null;
+            meshInfo.GpuSparseShapeIndices?.Dispose(); meshInfo.GpuSparseShapeIndices = null;
+            meshInfo.GpuSparsePosDeltas?.Dispose();    meshInfo.GpuSparsePosDeltas    = null;
+            meshInfo.GpuSparseNrmDeltas?.Dispose();    meshInfo.GpuSparseNrmDeltas    = null;
+            meshInfo.GpuSparseTanDeltas?.Dispose();    meshInfo.GpuSparseTanDeltas    = null;
+            meshInfo.GpuAllWeightsBuffer?.Dispose();   meshInfo.GpuAllWeightsBuffer   = null;
+            meshInfo.GpuSparseInitialized    = false;
 
             meshInfo.GpuBlendShapeInitialized = false;
         }

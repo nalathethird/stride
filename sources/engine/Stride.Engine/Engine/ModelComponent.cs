@@ -13,6 +13,7 @@ using Stride.Engine.Processors;
 using Stride.Graphics;
 using Stride.Rendering;
 using Stride.Updater;
+using Buffer = Stride.Graphics.Buffer;
 
 namespace Stride.Engine
 {
@@ -23,6 +24,7 @@ namespace Stride.Engine
     [Display("Model", Expand = ExpandRule.Once)]
     // TODO GRAPHICS REFACTOR
     [DefaultEntityComponentProcessor(typeof(ModelTransformProcessor))]
+    [DefaultEntityComponentProcessor(typeof(BlendShapeAutoProvisionProcessor), ExecutionMode = ExecutionMode.All)]
     [DefaultEntityComponentRenderer(typeof(ModelRenderProcessor))]
     [ComponentOrder(11000)]
     [ComponentCategory("Model")]
@@ -48,18 +50,6 @@ namespace Stride.Engine
             /// </summary>
             public float[] BlendShapeWeights;
 
-            /// <summary>Previous frame's blend shape weights, for dirty detection.</summary>
-            public float[] PreviousWeights;
-
-            /// <summary>Whether blend shape weights have changed since the last dispatch.</summary>
-            public bool BlendShapeDirty;
-
-            /// <summary>Whether blend shape per-entity state has been initialized.</summary>
-            public bool BlendShapeInitialized;
-
-            /// <summary>CPU staging buffer for CPU-side deformation output (matches VB[0] byte size).</summary>
-            public byte[] DeformedVertexData;
-
             /// <summary>
             /// The meshes current bounding box in world space.
             /// </summary>
@@ -70,80 +60,183 @@ namespace Stride.Engine
             /// </summary>
             public BoundingSphere BoundingSphere;
 
-            // --- GPU blend shape compute shader state (used by BlendShapeGpuDeformer) ---
+            // --- CPU blend shape deformation fields ---
 
-            /// <summary>Whether GPU blend shape buffers have been initialized for this mesh.</summary>
-            public bool GpuBlendShapeInitialized;
-
-            /// <summary>GPU StructuredBuffer of base (undeformed) positions.</summary>
-            public Buffer GpuBasePositions;
-
-            /// <summary>GPU StructuredBuffer of base (undeformed) normals.</summary>
-            public Buffer GpuBaseNormals;
-
-            /// <summary>GPU StructuredBuffer of base (undeformed) tangents.</summary>
-            public Buffer GpuBaseTangents;
-
-            /// <summary>GPU StructuredBuffer of packed per-target position deltas.</summary>
-            public Buffer GpuDeltaPositions;
-
-            /// <summary>GPU StructuredBuffer of packed per-target normal deltas.</summary>
-            public Buffer GpuDeltaNormals;
-
-            /// <summary>GPU StructuredBuffer of packed per-target tangent deltas.</summary>
-            public Buffer GpuDeltaTangents;
-
-            /// <summary>GPU StructuredBuffer for active target indices (compaction).</summary>
-            public Buffer GpuActiveIndicesBuffer;
-
-            /// <summary>GPU StructuredBuffer for active target weights (compaction).</summary>
-            public Buffer GpuActiveWeightsBuffer;
-
-            /// <summary>Cloned MeshDraw with UAV-capable output vertex buffer at VB[0].</summary>
+            /// <summary>
+            /// Per-entity cloned MeshDraw whose VB[0] points to a dynamic vertex buffer.
+            /// Null if this mesh has no blend shapes.
+            /// </summary>
+            [DataMemberIgnore]
             public MeshDraw ClonedMeshDraw;
 
-            // --- Fused blend shape + skinning state ---
+            /// <summary>
+            /// CPU-side staging buffer containing the deformed vertex data (same layout as VB[0]).
+            /// </summary>
+            [DataMemberIgnore]
+            public byte[] DeformedVertexData;
 
-            /// <summary>Whether fused blend shape + skinning has been initialized.</summary>
-            public bool UseFusedSkinning;
+            /// <summary>
+            /// Previous frame's blend shape weights for dirty detection.
+            /// </summary>
+            [DataMemberIgnore]
+            public float[] PreviousWeights;
 
-            /// <summary>GPU StructuredBuffer of per-vertex bone weights.</summary>
-            public Buffer GpuVertexBoneWeights;
+            /// <summary>
+            /// Whether blend shape weights changed since the last deformation.
+            /// </summary>
+            [DataMemberIgnore]
+            public bool BlendShapeDirty;
 
-            /// <summary>GPU StructuredBuffer of per-vertex bone indices.</summary>
-            public Buffer GpuVertexBoneIndices;
+            /// <summary>
+            /// Whether the initial base vertex data has been copied into the deformed buffer.
+            /// </summary>
+            [DataMemberIgnore]
+            public bool BlendShapeInitialized;
 
-            /// <summary>CPU-side object-space bone matrices for compute shader upload.</summary>
-            public Matrix[] ObjectSpaceBoneMatrices;
+            // --- GPU blend shape deformation fields ---
 
-            /// <summary>GPU StructuredBuffer of bone matrices for compute shader.</summary>
-            public Buffer GpuBoneMatricesBuffer;
+            /// <summary>
+            /// GPU StructuredBuffer containing base positions (bind pose). Created once at init.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuBasePositions;
 
-            // --- Sparse CSR blend shape state ---
+            /// <summary>
+            /// GPU StructuredBuffer containing base normals (bind pose). Created once at init.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuBaseNormals;
 
-            /// <summary>Whether the sparse GPU path is active for this mesh.</summary>
-            public bool UseSparseGpuPath;
+            /// <summary>
+            /// GPU StructuredBuffer containing base tangents (bind pose). May be null.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuBaseTangents;
 
-            /// <summary>GPU buffer: per-vertex offset into contribution arrays.</summary>
+            /// <summary>
+            /// GPU StructuredBuffer containing packed per-target position deltas.
+            /// Layout: [target0_vert0..target0_vertN, target1_vert0..target1_vertN, ...]
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuDeltaPositions;
+
+            /// <summary>
+            /// GPU StructuredBuffer containing packed per-target normal deltas.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuDeltaNormals;
+
+            /// <summary>
+            /// GPU StructuredBuffer containing packed per-target tangent deltas. May be null.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuDeltaTangents;
+
+            /// <summary>
+            /// GPU StructuredBuffer for active target indices (compacted each dirty frame).
+            /// Maps [0..activeCount) to original target indices in the delta arrays.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuActiveIndicesBuffer;
+
+            /// <summary>
+            /// GPU StructuredBuffer for active target weights (compacted each dirty frame).
+            /// Contains only weights with |w| > epsilon.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuActiveWeightsBuffer;
+
+            /// <summary>
+            /// Whether GPU blend shape buffers have been initialized for this mesh.
+            /// </summary>
+            [DataMemberIgnore]
+            public bool GpuBlendShapeInitialized;
+
+            // --- Sparse blendshape GPU buffers (built from MeshBlendShapeDefinition.CookedData) ---
+
+            /// <summary>Per-vertex start offsets into the flat contribution lists (StructuredBuffer&lt;uint&gt;).</summary>
+            [DataMemberIgnore]
             public Buffer GpuSparseVertexOffset;
 
-            /// <summary>GPU buffer: per-vertex contribution count.</summary>
+            /// <summary>Per-vertex contribution counts (StructuredBuffer&lt;uint&gt;).</summary>
+            [DataMemberIgnore]
             public Buffer GpuSparseVertexCount;
 
-            /// <summary>GPU buffer: flat array of contributing shape indices.</summary>
+            /// <summary>Target index for each flat contribution entry (StructuredBuffer&lt;uint&gt;).</summary>
+            [DataMemberIgnore]
             public Buffer GpuSparseShapeIndices;
 
-            /// <summary>GPU buffer: flat array of position deltas for contributions.</summary>
+            /// <summary>Position delta for each flat contribution entry (StructuredBuffer&lt;float3&gt;).</summary>
+            [DataMemberIgnore]
             public Buffer GpuSparsePosDeltas;
 
-            /// <summary>GPU buffer: flat array of normal deltas for contributions.</summary>
+            /// <summary>Normal delta for each flat contribution entry (StructuredBuffer&lt;float3&gt;).</summary>
+            [DataMemberIgnore]
             public Buffer GpuSparseNrmDeltas;
 
-            /// <summary>GPU buffer: flat array of tangent deltas for contributions.</summary>
+            /// <summary>
+            /// Tangent delta for each flat contribution entry (StructuredBuffer&lt;float3&gt;).
+            /// Null when the mesh has no tangent blendshape targets.
+            /// </summary>
+            [DataMemberIgnore]
             public Buffer GpuSparseTanDeltas;
 
-            /// <summary>GPU buffer: full weight array for all targets.</summary>
+            /// <summary>
+            /// Full per-target weight array uploaded each dirty frame (StructuredBuffer&lt;float&gt;).
+            /// Indexed by original target index so the sparse shader can look up any shape's weight.
+            /// </summary>
+            [DataMemberIgnore]
             public Buffer GpuAllWeightsBuffer;
+
+            /// <summary>Whether the sparse GPU buffers above have been initialised.</summary>
+            [DataMemberIgnore]
+            public bool GpuSparseInitialized;
+
+            // --- Fused blend shape + skinning fields (Phase 2) ---
+
+            /// <summary>
+            /// GPU StructuredBuffer containing object-space bone matrices.
+            /// Updated every frame: ObjectSpaceBone[i] = BlendMatrices[i] * MeshWorldInverse.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuBoneMatricesBuffer;
+
+            /// <summary>
+            /// GPU StructuredBuffer containing per-vertex bone weights (float4).
+            /// Extracted from the original vertex buffer at init time.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuVertexBoneWeights;
+
+            /// <summary>
+            /// GPU StructuredBuffer containing per-vertex bone indices (uint4).
+            /// Extracted from the original vertex buffer at init time.
+            /// Note: original VB stores as ushort4 — converted to uint4 at upload.
+            /// </summary>
+            [DataMemberIgnore]
+            public Buffer GpuVertexBoneIndices;
+
+            /// <summary>
+            /// CPU-side array for pre-multiplied object-space bone matrices.
+            /// Avoids per-frame heap allocation.
+            /// </summary>
+            [DataMemberIgnore]
+            public Matrix[] ObjectSpaceBoneMatrices;
+
+            /// <summary>
+            /// Whether fused compute skinning (blend shapes + skeletal skinning in one dispatch)
+            /// is active for this mesh. When true, VS skinning is suppressed.
+            /// </summary>
+            [DataMemberIgnore]
+            public bool UseFusedSkinning;
+
+            /// <summary>
+            /// When true, <see cref="BlendMatrices"/> are not recomputed from the skeleton each frame.
+            /// Set by external skinning systems (e.g. Strideonite) that supply pre-computed
+            /// InvBindPose × BoneWorldMatrix values directly.
+            /// </summary>
+            [DataMemberIgnore]
+            public bool UseExternalBlendMatrices;
         }
 
         /// <summary>
@@ -375,7 +468,7 @@ namespace Stride.Engine
                 meshInfo.BoundingSphere = BoundingSphere.Empty;
                 meshInfo.BoundingBox = BoundingBox.Empty;
 
-                if (mesh.Skinning != null && skeleton != null)
+                if (mesh.Skinning != null && skeleton != null && !meshInfo.UseExternalBlendMatrices)
                 {
                     bool meshHasBoundingBox = false;
                     var bones = mesh.Skinning.Bones;

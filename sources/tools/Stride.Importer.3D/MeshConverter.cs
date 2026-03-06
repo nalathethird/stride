@@ -689,7 +689,7 @@ namespace Stride.Importer.ThreeD
                     continue;
 
                 var meshName = mesh->MName.AsString;
-                var maxTargets = Math.Min((int)mesh->MNumAnimMeshes, 8);
+                var maxTargets = (int)mesh->MNumAnimMeshes; // No cap — match vertex deformation path
                 var targetNames = new string[maxTargets];
                 for (int t = 0; t < maxTargets; t++)
                 {

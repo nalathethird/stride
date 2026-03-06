@@ -113,7 +113,16 @@ namespace Stride.Rendering
                         renderMesh.IsScalingNegative = nodeTransformations[nodeIndex].IsScalingNegative;
                         renderMesh.BoundingBox = new BoundingBoxExt(meshInfo.BoundingBox);
                         renderMesh.BlendMatrices = meshInfo.BlendMatrices;
-                        renderMesh.BlendShapeWeights = meshInfo.BlendShapeWeights;
+
+                        // Use per-entity cloned MeshDraw (with dynamic VB) for blend shapes
+                        renderMesh.OverrideMeshDraw = meshInfo.ClonedMeshDraw;
+
+                        // When fused compute skinning is active, suppress VS skinning and
+                        // don't upload bone matrices to the per-draw cbuffer — the compute
+                        // shader has already applied both blend shapes and skeletal skinning.
+                        renderMesh.SkipVsSkinning = meshInfo.UseFusedSkinning;
+                        if (meshInfo.UseFusedSkinning)
+                            renderMesh.BlendMatrices = null;
                     }
                 }
             }

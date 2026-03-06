@@ -76,6 +76,18 @@ namespace Stride.Assets.Models
         [DefaultValue(true)]
         public bool MergeMeshes { get; set; } = true;
 
+        /// <summary>
+        /// Gets or sets whether blend shapes (morph targets) should be imported from the source model.
+        /// </summary>
+        /// <userdoc>
+        /// When checked, blend shapes (morph targets) from the source model will be imported for CPU-side deformation at runtime.
+        /// Disable this to reduce memory usage if the model's blend shapes are not needed.
+        /// </userdoc>
+        [DataMember(37)]
+        [DefaultValue(true)]
+        [Display("Import Blend Shapes", "Import Settings")]
+        public bool ImportBlendShapes { get; set; } = true;
+
         /// <inheritdoc/>
         [DataMember(40)]
         [MemberCollection(ReadOnly = true)]
