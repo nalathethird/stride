@@ -2,6 +2,7 @@
 // Distributed under the MIT license. See the LICENSE.md file in the project root for more information.
 
 using System;
+using System.Collections.Generic;
 using Stride.Core;
 using Stride.Core.Mathematics;
 
@@ -296,7 +297,7 @@ namespace Stride.Rendering
                     continue;
 
                 int affectedCount = 0;
-                var indices = new int[VertexCount]; // worst case
+                var indices = new List<int>();
 
                 int count = 0;
                 if (target.HasDeltaPositions && target.DeltaPositions != null)
@@ -332,12 +333,14 @@ namespace Stride.Rendering
                     }
 
                     if (nonZero)
-                        indices[affectedCount++] = v;
+                    {
+                        indices.Add(v);
+                        affectedCount++;
+                    }
                 }
 
                 target.AffectedVertexCount = affectedCount;
-                target.AffectedVertexIndices = new int[affectedCount];
-                Array.Copy(indices, target.AffectedVertexIndices, affectedCount);
+                target.AffectedVertexIndices = indices.ToArray();
                 target.Sparsity = VertexCount > 0 ? (float)affectedCount / VertexCount : 0f;
             }
         }

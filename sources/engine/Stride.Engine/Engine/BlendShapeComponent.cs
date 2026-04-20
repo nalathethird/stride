@@ -32,7 +32,7 @@ namespace Stride.Engine
         /// </summary>
         /// <userdoc>The weight of each blend shape target. 0 means no effect, 1 means full effect.</userdoc>
         [DataMember(10)]
-        [DataMemberRange(0.0, 1.0, 0.01, 0.1, 3)]
+        [DataMemberRange(0.0, 2.0, 0.01, 0.1, 3)]
         [Display("Weights")]
         [MemberCollection(ReadOnly = false)]
         [DataMemberUpdatable]
@@ -142,9 +142,11 @@ namespace Stride.Engine
         /// Revision counter incremented whenever weights are changed via <see cref="SetWeight"/> or
         /// the <see cref="Weights"/> dictionary is modified directly, so the processor knows to
         /// sync dictionary → array before the next deformation pass.
+        /// Note: SetWeight() takes priority over animation-driven WeightValues[] writes within
+        /// the same frame. If both sources modify weights simultaneously, the dictionary value wins.
         /// </summary>
         [DataMemberIgnore]
-        internal int DictionaryRevision { get; set; }
+        internal long DictionaryRevision { get; set; }
 
         /// <summary>
         /// Gets or sets the weight for a specific blend shape target by name.

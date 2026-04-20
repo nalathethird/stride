@@ -54,13 +54,31 @@ namespace Stride.Engine.Processors
         {
             data.LastModel = modelComponent.Model;
 
-            if (entity.Get<BlendShapeComponent>() != null)
-                return;
+            var hasTargets = HasBlendShapeTargets(modelComponent.Model);
+            var existing = entity.Get<BlendShapeComponent>();
 
-            if (!HasBlendShapeTargets(modelComponent.Model))
-                return;
+            if (hasTargets)
+            {
+                // Model has blend shapes — add component if missing
+                if (existing == null)
+                {
+                    entity.Add(new BlendShapeComponent());
+                }
+            }
+            else
+            {
+                // Model has no blend shapes — remove auto-provisioned component if present
+                if (existing != null && data.WasAutoProvisioned)
+                {
+                    entity.Remove<BlendShapeComponent>();
+                    data.WasAutoProvisioned = false;
+                }
+            }
 
-            entity.Add(new BlendShapeComponent());
+            if (hasTargets && existing == null)
+            {
+                data.WasAutoProvisioned = true;
+            }
         }
 
         /// <summary>
@@ -83,6 +101,7 @@ namespace Stride.Engine.Processors
         public class ProvisionState
         {
             public Model LastModel;
+            public bool WasAutoProvisioned;
         }
     }
 }

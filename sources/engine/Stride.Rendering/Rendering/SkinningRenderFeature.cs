@@ -142,6 +142,11 @@ namespace Stride.Rendering
                     if (renderModelObjectInfo == null)
                         continue;
 
+                    var copySize = (uint)renderModelObjectInfo.Length * (uint)sizeof(Matrix);
+                    var cbSize = renderNode.Resources.ConstantBuffer.Size;
+                    if (blendMatricesOffset + (int)copySize > cbSize)
+                        continue;
+
                     var mappedCB = (byte*)renderNode.Resources.ConstantBuffer.Data + blendMatricesOffset;
 
                     fixed (Matrix* blendMatricesPtr = renderModelObjectInfo)

@@ -45,6 +45,11 @@ namespace Stride.Rendering
         public Matrix[] BlendMatrices;
 
         /// <summary>
+        /// Per-entity blend shape weights for this mesh, set during Extract phase.
+        /// </summary>
+        public float[] BlendShapeWeights;
+
+        /// <summary>
         /// When true, vertex shader skinning is suppressed for this mesh.
         /// Set by the blend shape processor when fused compute skinning is active —
         /// the compute shader has already applied skeletal skinning, so the VS

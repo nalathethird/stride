@@ -201,13 +201,13 @@ namespace Stride.Engine.Processors
                             var target = ActiveTargets[t];
                             var weight = ActiveWeights[t];
 
-                            if (target.HasDeltaPositions && target.DeltaPositions != null)
+                            if (target.HasDeltaPositions && target.DeltaPositions != null && v < target.DeltaPositions.Length)
                                 pos += ToSys(target.DeltaPositions[v]) * weight;
 
-                            if (target.HasDeltaNormals && target.DeltaNormals != null)
+                            if (target.HasDeltaNormals && target.DeltaNormals != null && v < target.DeltaNormals.Length)
                                 nrm += ToSys(target.DeltaNormals[v]) * weight;
 
-                            if (HasTangent && target.HasDeltaTangents && target.DeltaTangents != null)
+                            if (HasTangent && target.HasDeltaTangents && target.DeltaTangents != null && v < target.DeltaTangents.Length)
                                 tan += ToSys(target.DeltaTangents[v]) * weight;
                         }
 

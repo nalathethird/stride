@@ -3,6 +3,7 @@
 
 using System;
 using Stride.Core;
+using Stride.Core.Mathematics;
 using Stride.Engine;
 using Stride.Graphics;
 using Stride.Graphics.Data;
@@ -99,6 +100,10 @@ namespace Stride.Engine.Processors
                         }
                     }
                     meshInfo.ClonedMeshDraw = null;
+                    // Reset GPU flags that DisposeGpuBuffers would have cleared
+                    meshInfo.GpuSparseInitialized = false;
+                    meshInfo.UseFusedSkinning = false;
+                    meshInfo.GpuBlendShapeInitialized = false;
                 }
 
                 meshInfo.DeformedVertexData = null;
@@ -178,6 +183,15 @@ namespace Stride.Engine.Processors
                         {
                             meshInfo.BlendShapeWeights[targetIdx] = weight;
                         }
+                        else
+                        {
+                            meshInfo.BlendShapeWeights[targetIdx] = 0.0f;
+                        }
+                    }
+                    // Zero out any remaining slots from a previous model with more targets
+                    for (int targetIdx = targets.Length; targetIdx < meshInfo.BlendShapeWeights.Length; targetIdx++)
+                    {
+                        meshInfo.BlendShapeWeights[targetIdx] = 0.0f;
                     }
 
                     // Determine if this mesh should use fused blend-shape + skinning
@@ -187,6 +201,22 @@ namespace Stride.Engine.Processors
                     if (canUseFused)
                     {
                         // --- Fused blend shape + skinning path ---
+                        // Check if all weights are zero and unchanged — if so, skip fused
+                        // compute and let standard VS skinning handle this mesh instead.
+                        bool allZero = true;
+                        for (int w = 0; w < meshInfo.BlendShapeWeights.Length; w++)
+                        {
+                            if (meshInfo.BlendShapeWeights[w] != 0f) { allZero = false; break; }
+                        }
+
+                        if (allZero && !BlendShapeDeformer.AreWeightsDirty(meshInfo.BlendShapeWeights, meshInfo.PreviousWeights)
+                            && meshInfo.GpuBlendShapeInitialized)
+                        {
+                            // All weights zero and unchanged — fall back to VS skinning
+                            meshInfo.BlendShapeDirty = false;
+                            continue;
+                        }
+
                         // Dispatches EVERY frame because bone matrices change each frame.
                         // The fused compute shader applies both blend shapes and skeletal
                         // skinning in a single dispatch, eliminating the VS skinning pass.
@@ -273,7 +303,7 @@ namespace Stride.Engine.Processors
             // Get the mesh's world matrix from the skeleton
             var skeleton = modelComponent.Skeleton;
             Matrix meshWorld;
-            if (skeleton != null)
+            if (skeleton != null && (uint)mesh.NodeIndex < (uint)skeleton.NodeTransformations.Length)
             {
                 meshWorld = skeleton.NodeTransformations[mesh.NodeIndex].WorldMatrix;
             }
@@ -293,8 +323,11 @@ namespace Stride.Engine.Processors
         /// </summary>
         private void DeformCpu(CommandList commandList, ModelComponent.MeshInfo meshInfo, Mesh mesh, BlendShapeTarget[] targets)
         {
+            // Cache locally to avoid TOCTOU if another thread nulls the field
+            var clonedMeshDraw = meshInfo.ClonedMeshDraw;
+
             // Ensure we have the CPU staging buffer and cloned MeshDraw
-            if (meshInfo.DeformedVertexData == null || meshInfo.ClonedMeshDraw == null)
+            if (meshInfo.DeformedVertexData == null || clonedMeshDraw == null)
                 return;
 
             // Copy the full base vertex buffer if not initialized yet
@@ -324,9 +357,9 @@ namespace Stride.Engine.Processors
             meshInfo.BlendShapeInitialized = true;
 
             // Upload deformed data to dynamic GPU vertex buffer
-            if (commandList != null && meshInfo.ClonedMeshDraw.VertexBuffers != null && meshInfo.ClonedMeshDraw.VertexBuffers.Length > 0)
+            if (commandList != null && clonedMeshDraw.VertexBuffers != null && clonedMeshDraw.VertexBuffers.Length > 0)
             {
-                var dynamicBuffer = meshInfo.ClonedMeshDraw.VertexBuffers[0].Buffer;
+                var dynamicBuffer = clonedMeshDraw.VertexBuffers[0].Buffer;
 
                 // Lazy-create the dynamic vertex buffer on first use
                 if (dynamicBuffer == null || dynamicBuffer.SizeInBytes != meshInfo.DeformedVertexData.Length)
@@ -336,7 +369,7 @@ namespace Stride.Engine.Processors
 
                     // Replace VB[0] binding with the new dynamic buffer
                     var origBinding = mesh.Draw.VertexBuffers[0];
-                    meshInfo.ClonedMeshDraw.VertexBuffers[0] = new VertexBufferBinding(
+                    clonedMeshDraw.VertexBuffers[0] = new VertexBufferBinding(
                         dynamicBuffer, origBinding.Declaration, origBinding.Count, origBinding.Stride, origBinding.Offset);
                 }
 
@@ -353,7 +386,7 @@ namespace Stride.Engine.Processors
             /// so the processor knows whether the user edited weights via the dictionary API
             /// or whether changes came from the animation system writing to <see cref="BlendShapeComponent.WeightValues"/>.
             /// </summary>
-            public int LastDictionaryRevision;
+            public long LastDictionaryRevision;
         }
     }
 }

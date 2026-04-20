@@ -98,12 +98,12 @@ namespace Stride.Rendering
         public override void PrepareEffectPermutationsImpl(RenderDrawContext context)
         {
             using var _ = Profiler.Begin(PreparePermutationsImplKey);
-            // Setup ActiveMeshDraw
+            // Setup ActiveMeshDraw — prefer per-entity override (e.g. blend shape deformed VB)
             Dispatcher.ForEach(RenderObjects, renderObject =>
             {
                 var renderMesh = (RenderMesh)renderObject;
 
-                renderMesh.ActiveMeshDraw = renderMesh.Mesh.Draw;
+                renderMesh.ActiveMeshDraw = renderMesh.OverrideMeshDraw ?? renderMesh.Mesh.Draw;
             });
 
             base.PrepareEffectPermutationsImpl(context);

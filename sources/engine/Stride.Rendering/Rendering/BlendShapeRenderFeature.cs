@@ -121,9 +121,12 @@ namespace Stride.Rendering
 
                     var mappedCB = (byte*)renderNode.Resources.ConstantBuffer.Data + weightsOffset;
 
+                    // Clamp copy size to prevent overwriting adjacent cbuffer memory
+                    // when the model has more targets than MaxBlendShapeCount.
+                    var copyCount = Math.Min(weights.Length, MaxBlendShapeCount);
                     fixed (float* weightsPtr = weights)
                     {
-                        MemoryUtilities.CopyWithAlignmentFallback(mappedCB, weightsPtr, (uint)weights.Length * sizeof(float));
+                        MemoryUtilities.CopyWithAlignmentFallback(mappedCB, weightsPtr, (uint)copyCount * sizeof(float));
                     }
                 }
             });

@@ -7,6 +7,7 @@ using Stride.Core;
 using Stride.Core.Annotations;
 using Stride.Core.Collections;
 using Stride.Core.Mathematics;
+using Stride.Rendering;
 
 namespace Stride.Engine.Processors
 {
@@ -33,6 +34,8 @@ namespace Stride.Engine.Processors
 
                 if (blendShapeComponent?.Weights == null)
                     continue;
+
+                bool modified = false;
 
                 // --- 1. Evaluate Pose-Space Deformations ---
                 var modelComponent = entity.Get<ModelComponent>();
@@ -61,11 +64,17 @@ namespace Stride.Engine.Processors
                             var transform = skeleton.NodeTransformations[nodeIndex].LocalMatrix;
                             transform.Decompose(out _, out Quaternion localRotation, out _);
 
-                            // Extract the angle around the specified axis
-                            // Simplified approach: dot product and angle calculation
+                            // Extract the signed angle around the specified axis using
+                            // the cross product to determine rotation direction.
                             Vector3 transformedAxis = Vector3.Transform(psd.RotationAxis, localRotation);
-                            float angleRad = (float)Math.Acos(MathUtil.Clamp(Vector3.Dot(psd.RotationAxis, transformedAxis), -1f, 1f));
-                            float angleDeg = MathUtil.RadiansToDegrees(angleRad);
+                            float dot = MathUtil.Clamp(Vector3.Dot(psd.RotationAxis, transformedAxis), -1f, 1f);
+                            float angleRad = (float)Math.Acos(dot);
+
+                            // Determine sign via cross product projected onto the rotation axis
+                            Vector3 cross;
+                            Vector3.Cross(ref psd.RotationAxis, ref transformedAxis, out cross);
+                            float sign = Vector3.Dot(cross, psd.RotationAxis) >= 0 ? 1f : -1f;
+                            float angleDeg = MathUtil.RadiansToDegrees(angleRad) * sign;
 
                             // Map angle to weight
                             float range = psd.MaxAngle - psd.MinAngle;
@@ -75,6 +84,7 @@ namespace Stride.Engine.Processors
                             if (blendShapeComponent.Weights.ContainsKey(psd.TargetShape))
                             {
                                 blendShapeComponent.Weights[psd.TargetShape] = finalWeight;
+                                modified = true;
                             }
                         }
                     }
@@ -102,8 +112,15 @@ namespace Stride.Engine.Processors
                         if (blendShapeComponent.Weights.ContainsKey(combo.TargetShape))
                         {
                             blendShapeComponent.Weights[combo.TargetShape] = result;
+                            modified = true;
                         }
                     }
+                }
+
+                // Bump revision so BlendShapeProcessor syncs dict → array this frame
+                if (modified)
+                {
+                    blendShapeComponent.DictionaryRevision++;
                 }
             }
         }

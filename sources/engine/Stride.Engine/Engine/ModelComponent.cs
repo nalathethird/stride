@@ -461,7 +461,8 @@ namespace Stride.Engine
             BoundingBox = BoundingBox.Empty;
             bool modelHasBoundingBox = false;
 
-            for (int meshIndex = 0; meshIndex < Model.Meshes.Count; meshIndex++)
+            var meshCount = Math.Min(Model.Meshes.Count, meshInfos.Count);
+            for (int meshIndex = 0; meshIndex < meshCount; meshIndex++)
             {
                 var mesh = Model.Meshes[meshIndex];
                 var meshInfo = meshInfos[meshIndex];
@@ -474,10 +475,13 @@ namespace Stride.Engine
                     var bones = mesh.Skinning.Bones;
 
                     // For skinned meshes, bounding box is union of the bounding boxes of the unskinned mesh, transformed by each affecting bone.
+                    var nodeTransformations = skeleton.NodeTransformations;
                     for (int boneIndex = 0; boneIndex < bones.Length; boneIndex++)
                     {
                         var nodeIndex = bones[boneIndex].NodeIndex;
-                        Matrix.Multiply(ref bones[boneIndex].LinkToMeshMatrix, ref skeleton.NodeTransformations[nodeIndex].WorldMatrix, out meshInfo.BlendMatrices[boneIndex]);
+                        if ((uint)nodeIndex >= (uint)nodeTransformations.Length)
+                            continue;
+                        Matrix.Multiply(ref bones[boneIndex].LinkToMeshMatrix, ref nodeTransformations[nodeIndex].WorldMatrix, out meshInfo.BlendMatrices[boneIndex]);
 
                         BoundingBox skinnedBoundingBox;
                         BoundingBox.Transform(ref mesh.BoundingBox, ref meshInfo.BlendMatrices[boneIndex], out skinnedBoundingBox);
@@ -500,7 +504,9 @@ namespace Stride.Engine
                 else
                 {
                     // If there is a skeleton, use the corresponding node's transform. Otherwise, fall back to the model transform.
-                    var transform = skeleton != null ? skeleton.NodeTransformations[mesh.NodeIndex].WorldMatrix : worldMatrix;
+                    var transform = skeleton != null && (uint)mesh.NodeIndex < (uint)skeleton.NodeTransformations.Length
+                        ? skeleton.NodeTransformations[mesh.NodeIndex].WorldMatrix
+                        : worldMatrix;
                     BoundingBox.Transform(ref mesh.BoundingBox, ref transform, out meshInfo.BoundingBox);
                     BoundingSphere.Transform(ref mesh.BoundingSphere, ref transform, out meshInfo.BoundingSphere);
                 }

@@ -4,8 +4,10 @@
 using System;
 using System.Runtime.InteropServices;
 using Stride.Core;
+using Stride.Core.Diagnostics;
 using Stride.Core.Mathematics;
 using Stride.Graphics;
+using Stride.Graphics.Data;
 using Stride.Rendering;
 using Stride.Rendering.BlendShapes;
 using Stride.Rendering.ComputeEffect;
@@ -34,6 +36,8 @@ namespace Stride.Engine.Processors
     /// </summary>
     public class BlendShapeGpuDeformer : IDisposable
     {
+        private static readonly Logger Log = GlobalLogger.GetLogger(nameof(BlendShapeGpuDeformer));
+
         private readonly GraphicsDevice graphicsDevice;
         private readonly IServiceRegistry services;
         private GraphicsContext graphicsContext;
@@ -320,6 +324,30 @@ namespace Stride.Engine.Processors
             {
                 destVB.SetData(graphicsContext.CommandList, new ReadOnlySpan<byte>(serializationData.Content));
             }
+            else
+            {
+                // Procedural meshes or runtime-created buffers may lack serialization data.
+                // Attempt GPU→GPU copy as fallback; if that also fails, log a warning so
+                // the user knows UVs/colors/bone-weights in the output buffer are uninitialized.
+                try
+                {
+                    if (sourceVB != null)
+                    {
+                        graphicsContext.CommandList.CopyRegion(sourceVB, 0, null, destVB, 0);
+                    }
+                    else
+                    {
+                        Log.Warning("BlendShape GPU deformer: source vertex buffer is null. " +
+                            "Output buffer may contain uninitialized vertex attributes (UVs, colors, bone weights).");
+                    }
+                }
+                catch
+                {
+                    Log.Warning("BlendShape GPU deformer: could not copy original vertex buffer content. " +
+                        "Output buffer may contain uninitialized vertex attributes (UVs, colors, bone weights). " +
+                        "This can happen with procedural meshes that lack serialization data.");
+                }
+            }
         }
 
         /// <summary>
@@ -369,7 +397,11 @@ namespace Stride.Engine.Processors
             var sourceVB = vbBinding.Buffer;
             var serializationData = sourceVB?.GetSerializationData();
             if (serializationData?.Content == null)
+            {
+                Log.Warning("BlendShape fused skinning: vertex buffer has no serialization data. " +
+                    "Fused skinning will not be initialized. This can happen with procedural meshes.");
                 return;
+            }
 
             var vbData = serializationData.Content;
             var boneWeights = new Vector4[vertexCount];
@@ -710,7 +742,7 @@ namespace Stride.Engine.Processors
         /// </summary>
         public static bool IsSupported(GraphicsDevice device)
         {
-            return device?.Features?.HasComputeShaders ?? false;
+            return device?.Features.HasComputeShaders ?? false;
         }
 
         public void Dispose()
